@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Складской Сканер (n8n + Supabase)</title>
+    <!-- Подключаем надежную библиотеку для сканирования через камеру в браузере -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #f8f9fa; padding: 20px; color: #333; }
+        .container { max-width: 500px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        h2 { margin-bottom: 5px; color: #1a1a1a; }
+        #reader { width: 100%; border-radius: 8px; overflow: hidden; background: #000; margin-top: 15px; }
+        .status { margin-top: 20px; padding: 12px; border-radius: 6px; font-weight: bold; font-size: 16px; display: none; }
+        .success { background: #d4edda; color: #155724; display: block; }
+        .error { background: #f8d7da; color: #721c24; display: block; }
+        .loading { background: #fff3cd; color: #856404; display: block; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Складской Сканер</h2>
+    <p style="color: #666; font-size: 14px;">Наведите камеру на штрихкод товара</p>
+    
+    <!-- Область, где будет отображаться видео с камеры -->
+    <div id="reader"></div>
+    
+    <!-- Сюда выводится статус отправки в n8n -->
+    <div id="status-box" class="status"></div>
+</div>
+
+<script>
+    // 1. УКАЖИТЕ СВОЙ WEBHOOK URL ИЗ N8N СЮДА
+    const N8N_WEBHOOK_URL = 'https://your-n8n-domain.com/webhook/v1/barcode-scan';
+
+    const statusBox = document.getElementById('status-box');
+    let isProcessing = false; // Защита от двойного сканирования одного и того же товара
+
+    function showStatus(text, type) {
+        statusBox.className = 'status ' + type;
+        statusBox.innerText = text;
+    }
+
+    // 2. Функция отправки штрихкода в n8n
+    function sendToN8n(barcode) {
+        isProcessing = true;
+        showStatus(`Отправка штрихкода: ${barcode}...`, 'loading');
+
+        fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                barcode: barcode,
+                scanned_at: new Date().toISOString()
+            })
+        })
+        .then(response => {
+            if (response.ok) {
+                showStatus(`Успешно! Товар ${barcode} отправлен в n8n.`, 'success');
+            } else {
+                showStatus(`Ошибка сервера n8n (Код: ${response.status})`, 'error');
+            }
+        })
+        .catch(err => {
+            showStatus(`Ошибка сети: не удалось связаться с n8n`, 'error');
+        })
+        .finally(() => {
+            // Пауза 2 секунды перед тем, как разрешить сканировать следующий товар
+            setTimeout(() => { isProcessing = false; }, 2000);
+        });
+    }
+
+    // 3. Инициализация камеры
+    function onScanSuccess(decodedText, decodedResult) {
+        // Если прямо сейчас идет отправка предыдущего штрихкода — игнорируем
+        if (isProcessing) return;
+        
+        // Запускаем отправку в n8n
+        sendToN8n(decodedText);
+    }
+
+    const html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader", 
+        { 
+            fps: 15, // Скорость сканирования (кадры в секунду)
+            qrbox: { width: 250, height: 150 }, // Размер рамки прицела для штрихкода
+            experimentalFeatures: { useBarCodeDetectorIfSupported: true } // Включает нативное ускорение смартфона
+        },
+        /* verbose= */ false
+    );
+    
+    html5QrcodeScanner.render(onScanSuccess);
+</script>
+
+</body>
+</html>
