@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Складской Сканер (n8n + Supabase)</title>
-    <script src="https://unpkg.com/html5-qrcode@2.3.4/minified/html5-qrcode.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode/minified/html5-qrcode.min.js"></script>
     
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -15,13 +15,10 @@
             padding: 20px; 
             color: #333; 
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
         .container { 
             max-width: 600px; 
-            width: 100%;
+            margin: 0 auto;
             background: white; 
             padding: 20px; 
             border-radius: 12px; 
@@ -38,13 +35,18 @@
             margin-bottom: 20px;
         }
         #reader { 
-            width: 100%; 
+            width: 100%;
+            max-width: 500px;
+            margin: 20px auto;
             border-radius: 8px; 
             overflow: hidden; 
             background: #000; 
-            margin-top: 15px;
-            border: 2px solid #ddd;
-            aspect-ratio: 1;
+            border: 3px solid #ddd;
+        }
+        #reader video {
+            width: 100%;
+            height: auto;
+            display: block;
         }
         .status { 
             margin-top: 20px; 
@@ -77,6 +79,12 @@
             background: #d1ecf1;
             color: #0c5460;
             border: 1px solid #bee5eb;
+            display: block;
+        }
+        .warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
             display: block;
         }
         .scanned-list {
@@ -138,6 +146,17 @@
         .btn-clear:hover {
             background: #5a6268;
         }
+        .debug-info {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 6px;
+            font-size: 12px;
+            text-align: left;
+            color: #666;
+            max-height: 150px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -154,7 +173,7 @@
     
     <!-- Кнопки управления -->
     <div class="controls">
-        <button class="btn-start" id="start-btn" onclick="startScanning()" style="display:none;">Начать сканирование</button>
+        <button class="btn-start" id="start-btn" onclick="startScanning()">Начать сканирование</button>
         <button class="btn-stop" id="stop-btn" onclick="stopScanning()" style="display:none;">Остановить</button>
         <button class="btn-clear" onclick="clearScanned()">Очистить список</button>
     </div>
@@ -164,6 +183,9 @@
         <h3>✓ История сканирования:</h3>
         <div id="scanned-items"></div>
     </div>
+
+    <!-- Debug информация -->
+    <div class="debug-info" id="debug-info"></div>
 </div>
 
 <script>
@@ -175,14 +197,23 @@
     const scannedItems = document.getElementById('scanned-items');
     const startBtn = document.getElementById('start-btn');
     const stopBtn = document.getElementById('stop-btn');
+    const debugInfo = document.getElementById('debug-info');
     
     let html5QrcodeScanner = null;
     let isProcessing = false;
     let scannedBarcodes = [];
+    let isScannerRunning = false;
+
+    function debug(msg) {
+        console.log(msg);
+        debugInfo.innerHTML += msg + '<br>';
+        debugInfo.scrollTop = debugInfo.scrollHeight;
+    }
 
     function showStatus(text, type = 'info') {
         statusBox.className = 'status ' + type;
         statusBox.innerText = text;
+        debug('STATUS: ' + text);
     }
 
     function addScannedItem(barcode) {
@@ -223,6 +254,7 @@
         })
         .catch(err => {
             console.error('Network error:', err);
+            debug('Network error: ' + err.message);
             showStatus(`⚠️ Локальное сохранение: ${barcode}`, 'info');
             addScannedItem(barcode);
         })
@@ -234,99 +266,105 @@
     // Обработчик сканирования
     function onScanSuccess(decodedText, decodedResult) {
         if (isProcessing) return;
-        console.log('Barcode scanned:', decodedText);
+        debug('🔍 Barcode scanned: ' + decodedText);
         sendToN8n(decodedText);
     }
 
     function onScanError(error) {
-        // Игнорируем ошибки сканирования (это нормально, когда нечего сканировать)
-        console.log('Scan error (normal):', error);
+        // Игнорируем ошибки сканирования (это нормально)
     }
 
     // Инициализация сканера
-    function initScanner() {
-        if (html5QrcodeScanner) {
-            html5QrcodeScanner.clear();
+    function startScanning() {
+        if (isScannerRunning) {
+            debug('Scanner already running');
+            return;
         }
 
-        html5QrcodeScanner = new Html5Qrcode("reader");
+        showStatus('⏳ Запуск камеры...', 'loading');
+        debug('Starting scanner...');
         
-        // Пытаемся запустить камеру с задней камеры
-        Html5Qrcode.getCameras().then(devices => {
-            if (devices && devices.length) {
-                console.log('Available cameras:', devices);
-                const backCamera = devices.find(device => 
-                    device.label.toLowerCase().includes('back') || 
-                    device.label.toLowerCase().includes('rear')
-                ) || devices[devices.length - 1]; // Если нет задней, берем последнюю
-                
-                startScanningWithCamera(backCamera.id);
-            } else {
-                showStatus('❌ Камеры не найдены', 'error');
+        if (html5QrcodeScanner) {
+            debug('Stopping existing scanner');
+            try {
+                html5QrcodeScanner.clear();
+            } catch (e) {
+                debug('Error clearing scanner: ' + e.message);
             }
-        }).catch(err => {
-            console.error('Error getting cameras:', err);
-            showStatus('❌ Ошибка доступа к камере', 'error');
-        });
-    }
+        }
 
-    function startScanningWithCamera(cameraId) {
-        const qrboxFunction = function(viewfinderWidth, viewfinderHeight) {
-            const minDimension = Math.min(viewfinderWidth, viewfinderHeight);
-            const boxSize = Math.floor(minDimension * 0.8);
-            return { width: boxSize, height: boxSize };
-        };
+        try {
+            html5QrcodeScanner = new Html5QrcodeScanner(
+                "reader", 
+                { 
+                    fps: 10,
+                    qrbox: { width: 250, height: 150 },
+                    rememberLastUsedCamera: true,
+                    useBarCodeDetectorIfSupported: true,
+                    aspectRatio: 1.0
+                },
+                false // verbose
+            );
 
-        html5QrcodeScanner.start(
-            cameraId,
-            {
-                fps: 10,
-                qrbox: qrboxFunction,
-                aspectRatio: 1.0,
-                disableFlip: false
-            },
-            onScanSuccess,
-            onScanError
-        ).then(() => {
-            console.log('Scanner started successfully');
+            debug('Scanner created, rendering...');
+
+            html5QrcodeScanner.render(
+                onScanSuccess,
+                onScanError
+            );
+
+            isScannerRunning = true;
             showStatus('✅ Сканер активен. Наведите на код...', 'info');
             startBtn.style.display = 'none';
             stopBtn.style.display = 'inline-block';
-        }).catch(err => {
-            console.error('Error starting scanner:', err);
-            showStatus(`❌ Ошибка запуска: ${err}`, 'error');
-            startBtn.style.display = 'inline-block';
-        });
-    }
+            debug('Scanner started successfully');
 
-    function startScanning() {
-        showStatus('⏳ Запуск камеры...', 'loading');
-        initScanner();
+        } catch (err) {
+            debug('Error starting scanner: ' + err.message);
+            console.error('Error starting scanner:', err);
+            showStatus(`❌ Ошибка: ${err.message}`, 'error');
+            isScannerRunning = false;
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
+        }
     }
 
     function stopScanning() {
-        if (html5QrcodeScanner) {
-            html5QrcodeScanner.stop().then(() => {
-                html5QrcodeScanner.clear();
-                showStatus('⏹️ Сканирование остановлено', 'info');
-                startBtn.style.display = 'inline-block';
-                stopBtn.style.display = 'none';
-            }).catch(err => {
-                console.error('Error stopping scanner:', err);
-            });
+        debug('Stopping scanner...');
+        try {
+            if (html5QrcodeScanner) {
+                html5QrcodeScanner.clear().then(() => {
+                    debug('Scanner stopped');
+                    showStatus('⏹️ Сканирование остановлено', 'info');
+                    isScannerRunning = false;
+                    startBtn.style.display = 'inline-block';
+                    stopBtn.style.display = 'none';
+                }).catch(err => {
+                    debug('Error stopping scanner: ' + err.message);
+                });
+            }
+        } catch (err) {
+            debug('Error in stopScanning: ' + err.message);
+            isScannerRunning = false;
+            startBtn.style.display = 'inline-block';
+            stopBtn.style.display = 'none';
         }
     }
 
     // Инициализация при загрузке страницы
     window.addEventListener('load', () => {
-        console.log('Page loaded, initializing scanner');
-        initScanner();
+        debug('=== Page loaded ===');
+        debug('html5-qrcode version available');
     });
 
     // Очистка при закрытии страницы
     window.addEventListener('beforeunload', () => {
-        if (html5QrcodeScanner) {
-            html5QrcodeScanner.stop().catch(err => console.error('Error stopping on unload:', err));
+        if (isScannerRunning && html5QrcodeScanner) {
+            try {
+                html5QrcodeScanner.clear();
+            } catch (e) {
+                console.error('Error on unload:', e);
+            }
         }
     });
 </script>
