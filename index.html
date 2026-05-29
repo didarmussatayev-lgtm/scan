@@ -38,7 +38,13 @@
             overflow: hidden;
             background: #000;
             margin: 20px 0;
-            border: 2px solid #ddd;
+            border: 3px solid #ddd;
+            transition: all 0.2s ease;
+        }
+        #reader.success-flash {
+            border-color: #28a745;
+            background: #d4edda;
+            box-shadow: 0 0 20px rgba(40, 167, 69, 0.6);
         }
         .info-box {
             padding: 15px;
@@ -46,11 +52,13 @@
             margin: 15px 0;
             border-left: 4px solid #007bff;
             background: #e7f3ff;
+            transition: all 0.3s ease;
         }
         .info-box.success {
             border-left-color: #28a745;
             background: #d4edda;
             color: #155724;
+            font-weight: bold;
         }
         .info-box.error {
             border-left-color: #dc3545;
@@ -97,7 +105,7 @@
             background: #f9f9f9;
             padding: 15px;
             border-radius: 8px;
-            max-height: 250px;
+            max-height: 300px;
             overflow-y: auto;
         }
         .scanned-items h3 {
@@ -107,21 +115,46 @@
         }
         .item {
             background: white;
-            padding: 10px;
+            padding: 10px 12px;
             margin: 8px 0;
             border-left: 4px solid #28a745;
             border-radius: 4px;
             display: flex;
             justify-content: space-between;
+            align-items: center;
             font-size: 13px;
+            animation: slideIn 0.3s ease;
+        }
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
         }
         .item .code {
             font-weight: bold;
             color: #28a745;
+            font-size: 14px;
         }
         .item .time {
             color: #999;
             font-size: 11px;
+        }
+        .counter {
+            text-align: center;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-weight: bold;
+            color: #333;
+        }
+        .hidden {
+            display: none !important;
         }
     </style>
 </head>
@@ -129,10 +162,10 @@
 
 <div class="container">
     <h1>📦 Сканер штрихкодов</h1>
-    <p class="subtitle">QR-коды, EAN, CODE-128 и другие</p>
+    <p class="subtitle">QR-коды, EAN, CODE-128 и другие форматы</p>
     
-    <div id="status" class="info-box">Готово. Нажмите "Запустить сканирование"</div>
-    <div id="error" class="info-box error">Ошибка: <span id="error-text"></span></div>
+    <div id="status" class="info-box">Готово. Нажмите "▶ Запустить сканирование"</div>
+    <div id="error" class="info-box error">❌ Ошибка: <span id="error-text"></span></div>
     
     <div id="reader"></div>
     
@@ -142,20 +175,67 @@
         <button class="btn-primary" onclick="testScan()">🧪 Тест (666)</button>
     </div>
     
+    <div class="counter">
+        📊 Всего отсканировано: <span id="count">0</span>
+    </div>
+    
     <div class="scanned-items">
-        <h3>✓ Отсканировано:</h3>
+        <h3>✓ История сканирования:</h3>
         <div id="items"></div>
     </div>
 </div>
 
 <script>
+    // Конфигурация
     const N8N_WEBHOOK = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
     
+    // Состояние
     let scanner = null;
     let isRunning = false;
     let lastCode = '';
     let lastCodeTime = 0;
-    const MIN_INTERVAL = 2000;
+    let totalCount = 0;
+    const MIN_INTERVAL = 1500; // 1.5 сек между одинаковыми кодами
+    
+    // Функция для создания звука (Web Audio API)
+    function playBeep() {
+        try {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            oscillator.frequency.value = 800; // Частота в Гц
+            oscillator.type = 'sine';
+            
+            gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+            
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.3);
+        } catch (e) {
+            console.log('Audio API not available');
+        }
+    }
+    
+    // Зелёная вспышка
+    function successFlash() {
+        const reader = document.getElementById('reader');
+        const status = document.getElementById('status');
+        
+        reader.classList.add('success-flash');
+        status.classList.add('success');
+        
+        playBeep();
+        if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+        
+        setTimeout(() => {
+            reader.classList.remove('success-flash');
+            status.classList.remove('success');
+        }, 1000);
+    }
     
     function updateStatus(msg, type = 'default') {
         const status = document.getElementById('status');
@@ -171,7 +251,7 @@
     }
     
     function testScan() {
-        handleScannedCode('777888999');
+        handleScannedCode('ТЕСТ-777888999');
     }
     
     function handleScannedCode(code) {
@@ -184,52 +264,51 @@
         lastCodeTime = now;
         
         console.log('Scanned:', code);
-        addItem(code);
-        sendWebhook(code);
+        totalCount++;
+        document.getElementById('count').innerText = totalCount;
         
-        if (navigator.vibrate) navigator.vibrate(200);
+        addItem(code);
+        successFlash();
+        sendWebhook(code);
     }
     
     function addItem(code) {
         const time = new Date().toLocaleTimeString('ru-RU');
         const item = document.createElement('div');
         item.className = 'item';
-        item.innerHTML = `<span class="code">${code}</span><span class="time">${time}</span>`;
+        item.innerHTML = `
+            <span class="code">📍 ${code}</span>
+            <span class="time">${time}</span>
+        `;
         document.getElementById('items').insertBefore(item, document.getElementById('items').firstChild);
         
-        while (document.getElementById('items').children.length > 20) {
+        while (document.getElementById('items').children.length > 30) {
             document.getElementById('items').removeChild(document.getElementById('items').lastChild);
         }
     }
     
     function sendWebhook(code) {
-        updateStatus(`📤 Отправка: ${code}...`, 'warning');
-        
         fetch(N8N_WEBHOOK + '?barcode=' + encodeURIComponent(code), {
             method: 'GET',
             mode: 'no-cors'
         })
         .then(() => {
-            updateStatus(`✅ Отправлено: ${code}`, 'success');
-            setTimeout(() => {
-                if (isRunning) updateStatus('⏸ Готово к сканированию...');
-            }, 2000);
+            console.log('Webhook sent for:', code);
         })
         .catch(err => {
             console.error('Webhook error:', err);
-            updateStatus(`⚠️ Код сохранён локально: ${code}`, 'warning');
         });
     }
     
     async function startScanning() {
         try {
-            updateStatus('⏳ Инициализация...', 'warning');
+            updateStatus('⏳ Запуск камеры... Разрешите доступ', 'warning');
             
             scanner = new Html5QrcodeScanner(
                 'reader',
                 {
-                    fps: 10,
-                    qrbox: { width: 300, height: 150 },
+                    fps: 20,
+                    qrbox: { width: 350, height: 200 },
                     experimentalFeatures: {
                         useBarCodeDetectorIfSupported: true
                     },
@@ -239,19 +318,25 @@
             );
             
             scanner.render(
-                (decodedText) => handleScannedCode(decodedText),
-                (error) => {}
+                (decodedText) => {
+                    console.log('Detected:', decodedText);
+                    handleScannedCode(decodedText);
+                },
+                (error) => {
+                    // Подавляем логирование ошибок поиска
+                }
             );
             
             isRunning = true;
             document.getElementById('start-btn').style.display = 'none';
             document.getElementById('stop-btn').style.display = 'inline-block';
-            updateStatus('✅ Камера запущена! Наведите на код...', 'success');
+            updateStatus('✅ Камера активна! 📷 Наведите на код...', 'success');
             
         } catch (err) {
             console.error('Scanner error:', err);
             showError(err.message);
-            updateStatus('❌ Ошибка: ' + err.message, 'error');
+            updateStatus('❌ Ошибка запуска: ' + err.message, 'error');
+            document.getElementById('start-btn').style.display = 'inline-block';
         }
     }
     
@@ -271,7 +356,9 @@
     
     window.addEventListener('beforeunload', () => {
         if (isRunning && scanner) {
-            try { scanner.clear(); } catch (e) {}
+            try { 
+                scanner.clear(); 
+            } catch (e) {}
         }
     });
 </script>
