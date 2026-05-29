@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Сканер штрихкодов</title>
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode/minified/html5-qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@1.2.3/minified/html5-qrcode.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -86,13 +86,6 @@
         .btn-primary:hover {
             background: #0056b3;
         }
-        .btn-success {
-            background: #28a745;
-            color: white;
-        }
-        .btn-success:hover {
-            background: #218838;
-        }
         .btn-danger {
             background: #dc3545;
             color: white;
@@ -162,7 +155,7 @@
     let isRunning = false;
     let lastCode = '';
     let lastCodeTime = 0;
-    const MIN_INTERVAL = 2000; // 2 сек между одинаковыми кодами
+    const MIN_INTERVAL = 2000;
     
     function updateStatus(msg, type = 'default') {
         const status = document.getElementById('status');
@@ -184,7 +177,7 @@
     function handleScannedCode(code) {
         const now = Date.now();
         if (code === lastCode && (now - lastCodeTime < MIN_INTERVAL)) {
-            return; // Игнорируем дубли
+            return;
         }
         
         lastCode = code;
@@ -194,7 +187,6 @@
         addItem(code);
         sendWebhook(code);
         
-        // Вибрация на смартфоне
         if (navigator.vibrate) navigator.vibrate(200);
     }
     
@@ -205,7 +197,6 @@
         item.innerHTML = `<span class="code">${code}</span><span class="time">${time}</span>`;
         document.getElementById('items').insertBefore(item, document.getElementById('items').firstChild);
         
-        // Ограничиваем до 20 элементов
         while (document.getElementById('items').children.length > 20) {
             document.getElementById('items').removeChild(document.getElementById('items').lastChild);
         }
@@ -234,23 +225,11 @@
         try {
             updateStatus('⏳ Инициализация...', 'warning');
             
-            const formatsToSupport = [
-                Html5QrcodeSupportedFormats.QR_CODE,
-                Html5QrcodeSupportedFormats.EAN_13,
-                Html5QrcodeSupportedFormats.EAN_8,
-                Html5QrcodeSupportedFormats.CODE_128,
-                Html5QrcodeSupportedFormats.CODE_39,
-                Html5QrcodeSupportedFormats.UPC_A,
-                Html5QrcodeSupportedFormats.UPC_E,
-                Html5QrcodeSupportedFormats.CODABAR
-            ];
-            
             scanner = new Html5QrcodeScanner(
                 'reader',
                 {
                     fps: 10,
                     qrbox: { width: 300, height: 150 },
-                    formatsToSupport: formatsToSupport,
                     experimentalFeatures: {
                         useBarCodeDetectorIfSupported: true
                     },
@@ -261,7 +240,7 @@
             
             scanner.render(
                 (decodedText) => handleScannedCode(decodedText),
-                (error) => { /* Подавляем лог ошибок сканирования */ }
+                (error) => {}
             );
             
             isRunning = true;
@@ -290,7 +269,6 @@
         }
     }
     
-    // Очистка при закрытии
     window.addEventListener('beforeunload', () => {
         if (isRunning && scanner) {
             try { scanner.clear(); } catch (e) {}
