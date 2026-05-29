@@ -4,8 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Сканер штрихкодов</title>
-    <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
-    <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
+    <script src="https://unpkg.com/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -33,19 +32,42 @@
             margin-bottom: 20px;
             font-size: 14px;
         }
-        #video, #canvas {
+        #video-container {
+            position: relative;
             width: 100%;
-            max-height: 500px;
-            border-radius: 8px;
             background: #000;
-            display: block;
+            border-radius: 8px;
+            overflow: hidden;
             margin: 20px 0;
             border: 3px solid #ddd;
         }
-        #canvas {
-            display: none;
+        #video {
+            width: 100%;
+            height: auto;
+            max-height: 500px;
+            display: block;
         }
-        video.success-flash, #canvas.success-flash {
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+        }
+        #reticle {
+            width: 80%;
+            max-width: 350px;
+            height: 150px;
+            border: 3px solid #00ff00;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.5) inset;
+        }
+        #video-container.success-flash {
             border-color: #28a745;
             box-shadow: 0 0 30px rgba(40, 167, 69, 0.8);
         }
@@ -167,9 +189,10 @@
             margin-top: 15px;
             font-size: 11px;
             color: #666;
-            max-height: 100px;
+            max-height: 120px;
             overflow-y: auto;
             font-family: monospace;
+            border: 1px solid #ddd;
         }
     </style>
 </head>
@@ -177,15 +200,19 @@
 
 <div class="container">
     <h1>📦 Сканер штрихкодов</h1>
-    <p class="subtitle">EAN-13, CODE-128, QR-коды (Quagga + ZXing)</p>
+    <p class="subtitle">EAN-13, CODE-128, QR-коды и другие</p>
     
     <div id="status" class="info-box">Готово. Нажмите "▶ Запустить"</div>
     
-    <video id="video"></video>
-    <canvas id="canvas"></canvas>
+    <div id="video-container">
+        <video id="video" playsinline></video>
+        <div id="overlay">
+            <div id="reticle"></div>
+        </div>
+    </div>
     
     <div class="buttons">
-        <button class="btn-primary" id="start-btn" onclick="startScanning()">▶ Запустить</button>
+        <button class="btn-primary" id="start-btn" onclick="startScanning()">▶ Запустить камеру</button>
         <button class="btn-danger" id="stop-btn" onclick="stopScanning()" style="display:none;">⏹ Стоп</button>
         <button class="btn-primary" onclick="testScan()">🧪 Тест (666)</button>
     </div>
@@ -206,26 +233,22 @@
     const N8N_WEBHOOK = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
     
     let video = document.getElementById('video');
-    let canvas = document.getElementById('canvas');
-    let ctx = canvas.getContext('2d');
-    
     let isRunning = false;
     let lastCode = '';
     let lastCodeTime = 0;
     let totalCount = 0;
     const MIN_INTERVAL = 1500;
+    let stream = null;
     
-    // Debug логирование
     function debug(msg) {
         const debugDiv = document.getElementById('debug');
-        debugDiv.innerHTML += msg + '<br>';
-        debugDiv.scrollTop = debugDiv.scrollHeight;
-        if (debugDiv.children.length > 20) {
-            debugDiv.removeChild(debugDiv.firstChild);
+        const time = new Date().toLocaleTimeString('ru-RU');
+        debugDiv.innerHTML = `[${time}] ${msg}<br>` + debugDiv.innerHTML;
+        if (debugDiv.children.length > 10) {
+            debugDiv.removeChild(debugDiv.lastChild);
         }
     }
     
-    // Звук
     function playBeep() {
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -246,16 +269,14 @@
         } catch (e) {}
     }
     
-    // Вспышка
     function successFlash() {
-        video.classList.add('success-flash');
-        canvas.classList.add('success-flash');
+        const container = document.getElementById('video-container');
+        container.classList.add('success-flash');
         playBeep();
         if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
         
         setTimeout(() => {
-            video.classList.remove('success-flash');
-            canvas.classList.remove('success-flash');
+            container.classList.remove('success-flash');
         }, 1000);
     }
     
@@ -264,6 +285,7 @@
         status.className = 'info-box';
         if (type !== 'default') status.classList.add(type);
         status.innerText = msg;
+        debug(msg);
     }
     
     function testScan() {
@@ -281,6 +303,7 @@
         lastCode = code;
         lastCodeTime = now;
         
+        console.log('✓ Scanned:', code);
         debug('✓ SCANNED: ' + code);
         totalCount++;
         document.getElementById('count').innerText = totalCount;
@@ -314,80 +337,82 @@
     
     async function startScanning() {
         try {
-            updateStatus('⏳ Инициализация камеры...', 'warning');
-            debug('Starting camera...');
+            updateStatus('⏳ Запрашиваю доступ к камере...', 'warning');
             
-            const stream = await navigator.mediaDevices.getUserMedia({
+            const constraints = {
                 video: {
-                    facingMode: 'environment',
+                    facingMode: { ideal: 'environment' },
                     width: { ideal: 1280 },
                     height: { ideal: 720 }
-                }
-            });
-            
-            video.srcObject = stream;
-            canvas.width = video.videoWidth || 1280;
-            canvas.height = video.videoHeight || 720;
-            
-            video.onloadedmetadata = () => {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-                startQuaggaScanning();
+                },
+                audio: false
             };
             
-            isRunning = true;
-            document.getElementById('start-btn').style.display = 'none';
-            document.getElementById('stop-btn').style.display = 'inline-block';
-            updateStatus('✅ Камера запущена! 📷 Наведите на штрихкод...', 'success');
+            stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            
+            video.onloadedmetadata = () => {
+                video.play();
+                updateStatus('✅ Камера активна! 📷 Наведите штрихкод на зелёную рамку', 'success');
+                isRunning = true;
+                document.getElementById('start-btn').style.display = 'none';
+                document.getElementById('stop-btn').style.display = 'inline-block';
+                
+                // Эмулируем сканирование через canvas каждые 100ms
+                scanLoop();
+            };
             
         } catch (err) {
-            debug('ERROR: ' + err.message);
+            debug('❌ ERROR: ' + err.message);
             console.error('Error:', err);
-            updateStatus('❌ Ошибка: ' + err.message, 'error');
+            updateStatus('❌ Ошибка камеры: ' + err.message, 'error');
             document.getElementById('start-btn').style.display = 'inline-block';
         }
     }
     
-    function startQuaggaScanning() {
-        if (!isRunning) return;
+    function scanLoop() {
+        if (!isRunning || !video.srcObject) return;
         
-        if (video.readyState === video.HAVE_ENOUGH_DATA) {
-            ctx.drawImage(video, 0, canvas.height - video.height, video.width, video.height);
+        try {
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth || 1280;
+            canvas.height = video.videoHeight || 720;
+            const ctx = canvas.getContext('2d');
             
-            // Используем Quagga для EAN-13 и CODE-128
-            Quagga.decodeSingle({
-                src: canvas.toDataURL(),
-                numQuadAttempts: 2,
-                inputStream: {
-                    size: 800
-                },
-                decoder: {
-                    readers: ['ean_reader', 'ean_8_reader', 'code_128_reader', 'code_39_reader', 'codabar_reader', 'upc_reader', 'upc_e_reader']
-                }
-            }, (result) => {
-                if (result && result.codeResult && result.codeResult.code) {
-                    debug('Quagga found: ' + result.codeResult.code);
-                    handleScannedCode(result.codeResult.code);
-                }
-            });
-        }
+            ctx.drawImage(video, 0, 0);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            // Примитивный поиск кодов через API браузера (если доступен)
+            if (window.BarcodeDetector) {
+                const barcodeDetector = new BarcodeDetector({
+                    formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'qr_code']
+                });
+                
+                barcodeDetector.detect(canvas).then(barcodes => {
+                    barcodes.forEach(barcode => {
+                        if (barcode.rawValue) {
+                            handleScannedCode(barcode.rawValue);
+                        }
+                    });
+                }).catch(err => {});
+            }
+        } catch (e) {}
         
-        if (isRunning) {
-            requestAnimationFrame(startQuaggaScanning);
-        }
+        requestAnimationFrame(scanLoop);
     }
     
     function stopScanning() {
         isRunning = false;
         
-        if (video.srcObject) {
-            video.srcObject.getTracks().forEach(track => track.stop());
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
         }
         
         document.getElementById('start-btn').style.display = 'inline-block';
         document.getElementById('stop-btn').style.display = 'none';
         updateStatus('⏹ Сканирование остановлено');
-        debug('Scanner stopped');
     }
     
     window.addEventListener('beforeunload', () => {
@@ -395,6 +420,9 @@
             stopScanning();
         }
     });
+    
+    // Инициализация
+    debug('Scanner ready');
 </script>
 
 </body>
