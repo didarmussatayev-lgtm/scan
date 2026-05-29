@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Сканер штрихкодов</title>
-    <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@1.2.3/minified/html5-qrcode.min.js"></script>
+    <script src="https://unpkg.com/@zxing/library@0.20.0"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { 
@@ -14,7 +14,7 @@
             color: #333;
         }
         .container {
-            max-width: 600px;
+            max-width: 700px;
             margin: 0 auto;
             background: white;
             padding: 20px;
@@ -32,19 +32,19 @@
             margin-bottom: 20px;
             font-size: 14px;
         }
-        #reader {
+        #video {
             width: 100%;
+            height: auto;
+            max-height: 500px;
             border-radius: 8px;
-            overflow: hidden;
             background: #000;
+            display: block;
             margin: 20px 0;
             border: 3px solid #ddd;
-            transition: all 0.2s ease;
         }
-        #reader.success-flash {
+        #video.success-flash {
             border-color: #28a745;
-            background: #d4edda;
-            box-shadow: 0 0 20px rgba(40, 167, 69, 0.6);
+            box-shadow: 0 0 30px rgba(40, 167, 69, 0.8);
         }
         .info-box {
             padding: 15px;
@@ -64,7 +64,6 @@
             border-left-color: #dc3545;
             background: #f8d7da;
             color: #721c24;
-            display: none;
         }
         .info-box.warning {
             border-left-color: #ffc107;
@@ -91,7 +90,7 @@
             background: #007bff;
             color: white;
         }
-        .btn-primary:hover {
+        .btn-primary:hover:not(:disabled) {
             background: #0056b3;
         }
         .btn-danger {
@@ -100,6 +99,19 @@
         }
         .btn-danger:hover {
             background: #c82333;
+        }
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .counter {
+            text-align: center;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 6px;
+            margin-top: 15px;
+            font-weight: bold;
+            color: #333;
         }
         .scanned-items {
             background: #f9f9f9;
@@ -139,22 +151,12 @@
             font-weight: bold;
             color: #28a745;
             font-size: 14px;
+            flex: 1;
         }
         .item .time {
             color: #999;
             font-size: 11px;
-        }
-        .counter {
-            text-align: center;
-            padding: 10px;
-            background: #f0f0f0;
-            border-radius: 6px;
-            margin-top: 15px;
-            font-weight: bold;
-            color: #333;
-        }
-        .hidden {
-            display: none !important;
+            margin-left: 10px;
         }
     </style>
 </head>
@@ -162,12 +164,11 @@
 
 <div class="container">
     <h1>📦 Сканер штрихкодов</h1>
-    <p class="subtitle">QR-коды, EAN, CODE-128 и другие форматы</p>
+    <p class="subtitle">EAN-13, CODE-128, QR-коды и другие форматы</p>
     
-    <div id="status" class="info-box">Готово. Нажмите "▶ Запустить сканирование"</div>
-    <div id="error" class="info-box error">❌ Ошибка: <span id="error-text"></span></div>
+    <div id="status" class="info-box">Готово. Нажмите "▶ Запустить"</div>
     
-    <div id="reader"></div>
+    <video id="video"></video>
     
     <div class="buttons">
         <button class="btn-primary" id="start-btn" onclick="startScanning()">▶ Запустить</button>
@@ -186,18 +187,17 @@
 </div>
 
 <script>
-    // Конфигурация
     const N8N_WEBHOOK = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
     
-    // Состояние
-    let scanner = null;
+    let video = document.getElementById('video');
+    let codeReader = null;
     let isRunning = false;
     let lastCode = '';
     let lastCodeTime = 0;
     let totalCount = 0;
-    const MIN_INTERVAL = 1500; // 1.5 сек между одинаковыми кодами
+    const MIN_INTERVAL = 1500;
     
-    // Функция для создания звука (Web Audio API)
+    // Звук
     function playBeep() {
         try {
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -207,7 +207,7 @@
             oscillator.connect(gainNode);
             gainNode.connect(audioContext.destination);
             
-            oscillator.frequency.value = 800; // Частота в Гц
+            oscillator.frequency.value = 800;
             oscillator.type = 'sine';
             
             gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
@@ -215,25 +215,17 @@
             
             oscillator.start(audioContext.currentTime);
             oscillator.stop(audioContext.currentTime + 0.3);
-        } catch (e) {
-            console.log('Audio API not available');
-        }
+        } catch (e) {}
     }
     
-    // Зелёная вспышка
+    // Вспышка
     function successFlash() {
-        const reader = document.getElementById('reader');
-        const status = document.getElementById('status');
-        
-        reader.classList.add('success-flash');
-        status.classList.add('success');
-        
+        video.classList.add('success-flash');
         playBeep();
         if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
         
         setTimeout(() => {
-            reader.classList.remove('success-flash');
-            status.classList.remove('success');
+            video.classList.remove('success-flash');
         }, 1000);
     }
     
@@ -244,17 +236,13 @@
         status.innerText = msg;
     }
     
-    function showError(msg) {
-        const error = document.getElementById('error');
-        document.getElementById('error-text').innerText = msg;
-        error.style.display = 'block';
-    }
-    
     function testScan() {
         handleScannedCode('ТЕСТ-777888999');
     }
     
     function handleScannedCode(code) {
+        if (!code || code.trim() === '') return;
+        
         const now = Date.now();
         if (code === lastCode && (now - lastCodeTime < MIN_INTERVAL)) {
             return;
@@ -263,7 +251,7 @@
         lastCode = code;
         lastCodeTime = now;
         
-        console.log('Scanned:', code);
+        console.log('✓ Scanned:', code);
         totalCount++;
         document.getElementById('count').innerText = totalCount;
         
@@ -291,73 +279,63 @@
         fetch(N8N_WEBHOOK + '?barcode=' + encodeURIComponent(code), {
             method: 'GET',
             mode: 'no-cors'
-        })
-        .then(() => {
-            console.log('Webhook sent for:', code);
-        })
-        .catch(err => {
-            console.error('Webhook error:', err);
-        });
+        }).catch(err => console.log('Webhook sent'));
     }
     
     async function startScanning() {
         try {
-            updateStatus('⏳ Запуск камеры... Разрешите доступ', 'warning');
+            updateStatus('⏳ Инициализация ZXing...', 'warning');
             
-            scanner = new Html5QrcodeScanner(
-                'reader',
-                {
-                    fps: 20,
-                    qrbox: { width: 350, height: 200 },
-                    experimentalFeatures: {
-                        useBarCodeDetectorIfSupported: true
-                    },
-                    rememberLastUsedCamera: true
-                },
-                false
-            );
+            codeReader = new ZXing.BrowserMultiFormatReader();
             
-            scanner.render(
-                (decodedText) => {
-                    console.log('Detected:', decodedText);
-                    handleScannedCode(decodedText);
-                },
-                (error) => {
-                    // Подавляем логирование ошибок поиска
+            const devices = await codeReader.listVideoInputDevices();
+            console.log('Available devices:', devices);
+            
+            let selectedDevice = devices.find(d => d.label.includes('back') || d.label.includes('rear'));
+            if (!selectedDevice) selectedDevice = devices.length > 1 ? devices[1] : devices[0];
+            
+            updateStatus('⏳ Запуск камеры...', 'warning');
+            
+            await codeReader.decodeFromVideoDevice(
+                selectedDevice.deviceId,
+                video,
+                (result, err) => {
+                    if (result) {
+                        console.log('Result:', result.text);
+                        handleScannedCode(result.text);
+                    }
+                    if (err && !(err instanceof ZXing.NotFoundException)) {
+                        console.error('Scan error:', err);
+                    }
                 }
             );
             
             isRunning = true;
             document.getElementById('start-btn').style.display = 'none';
             document.getElementById('stop-btn').style.display = 'inline-block';
-            updateStatus('✅ Камера активна! 📷 Наведите на код...', 'success');
+            updateStatus('✅ Камера активна! 📷 Наведите на штрихкод...', 'success');
             
         } catch (err) {
-            console.error('Scanner error:', err);
-            showError(err.message);
-            updateStatus('❌ Ошибка запуска: ' + err.message, 'error');
+            console.error('Error:', err);
+            updateStatus('❌ Ошибка: ' + err.message, 'error');
             document.getElementById('start-btn').style.display = 'inline-block';
         }
     }
     
     function stopScanning() {
-        if (scanner) {
-            try {
-                scanner.clear();
-                isRunning = false;
-                document.getElementById('start-btn').style.display = 'inline-block';
-                document.getElementById('stop-btn').style.display = 'none';
-                updateStatus('⏹ Сканирование остановлено');
-            } catch (err) {
-                console.error('Stop error:', err);
-            }
+        if (codeReader) {
+            codeReader.reset();
+            isRunning = false;
+            document.getElementById('start-btn').style.display = 'inline-block';
+            document.getElementById('stop-btn').style.display = 'none';
+            updateStatus('⏹ Сканирование остановлено');
         }
     }
     
     window.addEventListener('beforeunload', () => {
-        if (isRunning && scanner) {
+        if (isRunning && codeReader) {
             try { 
-                scanner.clear(); 
+                codeReader.reset(); 
             } catch (e) {}
         }
     });
