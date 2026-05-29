@@ -12,14 +12,18 @@
         video { width: 100%; height: 100%; object-fit: cover; }
         .laser { position: absolute; top: 50%; left: 5%; width: 90%; height: 2px; background: #ff3333; box-shadow: 0 0 8px #ff3333; z-index: 10; }
         .btn { background: #007bff; color: white; border: none; padding: 12px; font-size: 16px; border-radius: 6px; width: 100%; cursor: pointer; font-weight: bold; margin-top: 10px; }
-        #log-box { text-align: left; background: #111; color: #00ff66; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 13px; max-height: 140px; overflow-y: auto; white-space: pre-wrap; }
+        .btn:hover { background: #0056b3; }
+        .btn-stop { background: #dc3545; margin-top: 5px; }
+        #log-box { text-align: left; background: #111; color: #00ff66; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 12px; max-height: 180px; overflow-y: auto; border: 1px solid #333; }
         .err { color: #ff4d4d; }
+        .success { color: #00ff66; }
+        .counter { background: #28a745; padding: 10px; border-radius: 6px; margin-top: 10px; font-weight: bold; }
     </style>
 </head>
 <body>
 
 <div class="wrapper">
-    <h3 style="margin: 0 0 5px 0;">Складской Сканер v3</h3>
+    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v3</h3>
     <p style="color: #aaa; font-size: 13px; margin: 0;">Наведите красную линию на штрихкод товара</p>
     
     <div id="video-container">
@@ -27,78 +31,137 @@
         <div class="laser"></div>
     </div>
 
-    <button class="btn" id="scan-trigger">Включить камеру</button>
+    <button class="btn" id="scan-trigger">▶ Включить камеру</button>
+    <button class="btn btn-stop" id="stop-trigger" style="display:none;">⏹ Стоп</button>
+    
+    <div class="counter">
+        Отсканировано: <span id="count">0</span> ✓
+    </div>
     
     <div id="log-box">Система готова к запуску.</div>
 </div>
 
 <script>
-    // 1. ВСТАВЬТЕ СЮДА ВАШ WEBHOOK ИЗ N8N
+    // WEBHOOK URL ИЗ N8N
     const N8N_URL = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
 
     const logBox = document.getElementById('log-box');
+    const scanTrigger = document.getElementById('scan-trigger');
+    const stopTrigger = document.getElementById('stop-trigger');
+    const countDisplay = document.getElementById('count');
+    
     let codeReader;
     let isScanning = false;
     let lock = false;
+    let scannedCount = 0;
+    let decodingSession = null;
 
-    function printLog(text, isErr = false) {
+    function printLog(text, isErr = false, isSuccess = false) {
         const time = new Date().toLocaleTimeString();
-        const msg = isErr ? `<span class="err">[ОШИБКА] ${text}</span>` : `[${time}] ${text}`;
-        logBox.innerHTML += '<br>' + msg;
+        let className = '';
+        if (isErr) className = 'err';
+        else if (isSuccess) className = 'success';
+        
+        const msg = `<span class="${className}">[${time}] ${text}</span>`;
+        logBox.innerHTML += msg + '<br>';
         logBox.scrollTop = logBox.scrollHeight;
     }
 
-    // Инициализация автономного сканера ZXing
-    document.getElementById('scan-trigger').addEventListener('click', () => {
+    // Кнопка "Включить камеру"
+    scanTrigger.addEventListener('click', async () => {
         if (isScanning) return;
-        isScanning = true;
-        printLog('Инициализация камеры и движка ZXing...');
-
-        codeReader = new ZXing.BrowserMultiFormatReader();
         
-        // Запуск непрерывного декодирования с задней камеры
-        codeReader.decodeFromVideoDevice(undefined, 'video', (result, error) => {
-            if (result && !lock) {
-                lock = true; // Блокировка от повторных срабатываний
-                const barcode = result.text;
-                printLog(`Успешно считан код: ${barcode}`);
-                
-                if (navigator.vibrate) navigator.vibrate(100); // Вибрация при успехе
-                
-                sendDataToN8n(barcode);
-            }
-            // Ошибки фонового поиска (когда в кадре нет кода) просто игнорируем, чтобы не спамить лог
-        }).then(() => {
-            printLog('Камера работает. Сканируйте штрихкоды товаров.');
-        }).catch(err => {
+        try {
+            isScanning = true;
+            scanTrigger.style.display = 'none';
+            stopTrigger.style.display = 'block';
+            printLog('📷 Инициализация камеры и ZXing...', false, false);
+
+            codeReader = new ZXing.BrowserMultiFormatReader();
+            
+            // Запуск декодирования
+            decodingSession = await codeReader.decodeFromVideoDevice(undefined, 'video', (result, error) => {
+                if (result && !lock) {
+                    lock = true;
+                    const barcode = result.text;
+                    scannedCount++;
+                    countDisplay.innerText = scannedCount;
+                    
+                    printLog(`✓ Код: ${barcode}`, false, true);
+                    
+                    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+                    
+                    // Отправляем в N8N
+                    sendDataToN8n(barcode);
+                }
+            });
+            
+            printLog('✓ Камера работает. Сканируйте штрихкоды.', false, true);
+
+        } catch (err) {
             isScanning = false;
-            printLog('Не удалось запустить камеру: ' + err.message, true);
-        });
+            scanTrigger.style.display = 'block';
+            stopTrigger.style.display = 'none';
+            printLog(`❌ Ошибка камеры: ${err.message}`, true);
+        }
     });
 
-    // Функция отправки в n8n без блокировок CORS браузера
-    function sendDataToN8n(code) {
-        printLog(`Отправка на n8n...`);
+    // Кнопка "Стоп"
+    stopTrigger.addEventListener('click', () => {
+        if (codeReader) {
+            codeReader.reset();
+        }
+        isScanning = false;
+        scanTrigger.style.display = 'block';
+        stopTrigger.style.display = 'none';
+        printLog('⏹ Сканирование остановлено.');
+    });
 
-        // Используем режим 'no-cors', чтобы браузер телефона НЕ блокировал запрос
-        fetch(N8N_URL, {
-            method: 'POST',
-            mode: 'no-cors', 
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ barcode: code, scanned_at: new Date().toISOString() })
+    // Отправка в N8N через GET параметр
+    function sendDataToN8n(code) {
+        // Правильный способ: GET запрос с параметром в URL
+        const webhookUrl = N8N_URL + '?barcode=' + encodeURIComponent(code);
+        
+        printLog(`📤 Отправка кода ${code} в N8N...`);
+
+        fetch(webhookUrl, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            }
         })
-        .then(() => {
-            // При 'no-cors' браузер не отдаст нам тело ответа, но сам факт успешного выполнения промиса означает, что данные улетели!
-            printLog(`Данные кода ${code} успешно улетели в сторону n8n!`);
+        .then(response => {
+            // Проверяем статус ответа
+            if (response.ok) {
+                printLog(`✓ N8N получил код: ${code}`, false, true);
+            } else {
+                printLog(`⚠ N8N ответил со статусом ${response.status}`, true);
+            }
+            return response.text();
+        })
+        .then(data => {
+            if (data) {
+                printLog(`N8N ответ: ${data.substring(0, 50)}`);
+            }
         })
         .catch(err => {
-            printLog(`Ошибка отправки: ${err.message}`, true);
+            printLog(`❌ Ошибка отправки: ${err.message}`, true);
         })
         .finally(() => {
-            // Через 3 секунды снимаем блок и готовы сканировать следующий товар
-            setTimeout(() => { lock = false; }, 3000);
+            // Через 2 секунды разблокируем сканирование
+            setTimeout(() => { 
+                lock = false;
+                printLog('Готов к следующему коду.');
+            }, 2000);
         });
     }
+
+    // При закрытии страницы
+    window.addEventListener('beforeunload', () => {
+        if (codeReader) {
+            codeReader.reset();
+        }
+    });
 </script>
 
 </body>
