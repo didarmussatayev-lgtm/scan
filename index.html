@@ -3,70 +3,88 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Быстрый Складской Сканер</title>
+    <title>Автономный Сканер Штрихкодов</title>
     <style>
-        body { font-family: sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding: 20px; }
-        .scanner-container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        video { width: 100%; border-radius: 10px; background: black; transform: scaleX(1); }
-        .btn { background: #007bff; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 15px; }
-        #result { margin-top: 15px; font-weight: bold; font-size: 18px; color: #28a745; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding: 20px; }
+        .container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        /* Важно для Quagga: контейнер видео должен быть с относительным позиционированием */
+        #interactive { width: 100%; height: 300px; background: black; border-radius: 10px; overflow: hidden; position: relative; }
+        #interactive video { width: 100%; height: 100%; object-fit: cover; }
+        /* Красный прицел по центру для удобства кладовщика */
+        .laser-line { position: absolute; top: 50%; left: 5%; width: 90%; height: 2px; background: red; box-shadow: 0 0 8px red; z-index: 10; }
+        #result { margin-top: 15px; font-weight: bold; font-size: 18px; color: #28a745; word-break: break-all; }
         .loading { color: #ffc107; }
+        .error { color: #dc3545; }
     </style>
 </head>
 <body>
 
-<div class="scanner-container">
-    <h2>Сканер Склада v2</h2>
-    <p>Наведите камеру на штрихкод товара</p>
+<div class="container">
+    <h2>Сканер Штрихкодов</h2>
+    <p style="color: #666;">Наведите красную линию на штрихкод товара</p>
     
-    <video id="webcam-video"></video>
+    <div id="interactive" class="viewport">
+        <div class="laser-line"></div>
+    </div>
     
-    <div id="result">Ожидание штрихкода...</div>
+    <div id="result">Запуск камеры...</div>
 </div>
 
-<script type="module">
-    import QrScanner from 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner.min.js';
+<script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2/dist/quagga.min.js"></script>
 
-    // 1. Сюда вставляем ваш рабочий Webhook из n8n
+<script>
+    // Укажите ваш Webhook URL из n8n
     const N8N_WEBHOOK_URL = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
     
-    const videoElem = document.getElementById('webcam-video');
+    let lockScanner = false;
     const resultElem = document.getElementById('result');
-    let lockScanner = false; // Блокировка, чтобы не слать дубли при одном сканировании
 
-    // 2. Инициализируем сканер Nimiq
-    const qrScanner = new QrScanner(
-        videoElem,
-        result => handleScannedCode(result.data), // Функция при успешном сканировании
-        {
-            returnDetailedScanResult: true,
-            highlightScanRegion: true, // Рисует рамку прицела на экране
-            highlightCodeOutline: true, // Подсвечивает сам штрихкод при нахождении
-            maxScansPerSecond: 5
+    // Настраиваем сканер
+    Quagga.init({
+        inputStream: {
+            name: "Live",
+            type: "LiveStream",
+            target: document.querySelector('#interactive'), // Куда выводить видео
+            constraints: {
+                facingMode: "environment" // Использовать заднюю камеру
+            },
+        },
+        decoder: {
+            // Включаем форматы складских штрихкодов (EAN-13 и Code 128 как в вашем файле)
+            readers: ["ean_reader", "code_128_reader"] 
+        },
+        locate: true // Автоматически искать штрихкод в кадре
+    }, function(err) {
+        if (err) {
+            resultElem.className = 'error';
+            resultElem.innerText = "Ошибка камеры: " + err.name;
+            return;
         }
-    );
-
-    // Запускаем камеру
-    qrScanner.start().catch(err => {
-        resultElem.style.color = 'red';
-        resultElem.innerText = 'Ошибка камеры: ' + err;
+        Quagga.start();
+        resultElem.innerText = "Камера готова. Наведите на штрихкод.";
     });
 
-    // 3. Логика отправки в n8n
-    function handleScannedCode(barcode) {
-        if (lockScanner) return; // Если процесс идет — игнорируем повторные кадры
+    // Функция, которая срабатывает при успешном распознавании полосок штрихкода
+    Quagga.onDetected(function(data) {
+        const barcode = data.codeResult.code;
+        
+        // Проверяем валидность кода (у EAN-13 должно быть 13 цифр)
+        if (!barcode || barcode.length < 12) return;
+        if (lockScanner) return;
         lockScanner = true;
 
-        resultElem.className = 'loading';
-        resultElem.innerText = `Отправка кода ${barcode}...`;
+        if (navigator.vibrate) navigator.vibrate(100); // Виброотклик
 
-        // Шлем POST запрос в n8n
+        resultElem.className = 'loading';
+        resultElem.innerText = `Код ${barcode} отправлен в n8n...`;
+
+        // Отправка в n8n
         fetch(N8N_WEBHOOK_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 barcode: barcode,
-                timestamp: new Date().toISOString()
+                scanned_at: new Date().toISOString()
             })
         })
         .then(res => {
@@ -75,19 +93,18 @@
                 resultElem.style.color = '#28a745';
                 resultElem.innerText = `Успешно отправлено: ${barcode}`;
             } else {
-                throw new Error('Ошибка n8n');
+                throw new Error();
             }
         })
-        .catch(err => {
-            resultElem.className = '';
-            resultElem.style.color = 'red';
-            resultElem.innerText = 'Ошибка отправки в n8n';
+        .catch(() => {
+            resultElem.className = 'error';
+            resultElem.innerText = `Ошибка n8n при отправке кода ${barcode}`;
         })
         .finally(() => {
-            // Даем кладовщику 2.5 секунды убрать товар от камеры перед следующим сканированием
-            setTimeout(() => { lockScanner = false; }, 2500);
+            // Пауза 3 секунды, чтобы успеть убрать товар от экрана
+            setTimeout(() => { lockScanner = false; }, 3000);
         });
-    }
+    });
 </script>
 </body>
 </html>
