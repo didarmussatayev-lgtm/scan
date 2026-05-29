@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Быстрый Складской Сканер</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding: 20px; }
+        .scanner-container { max-width: 400px; margin: 0 auto; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        video { width: 100%; border-radius: 10px; background: black; transform: scaleX(1); }
+        .btn { background: #007bff; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 15px; }
+        #result { margin-top: 15px; font-weight: bold; font-size: 18px; color: #28a745; }
+        .loading { color: #ffc107; }
+    </style>
+</head>
+<body>
+
+<div class="scanner-container">
+    <h2>Сканер Склада v2</h2>
+    <p>Наведите камеру на штрихкод товара</p>
+    
+    <video id="webcam-video"></video>
+    
+    <div id="result">Ожидание штрихкода...</div>
+</div>
+
+<script type="module">
+    import QrScanner from 'https://unpkg.com/qr-scanner@1.4.2/qr-scanner.min.js';
+
+    // 1. Сюда вставляем ваш рабочий Webhook из n8n
+    const N8N_WEBHOOK_URL = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
+    
+    const videoElem = document.getElementById('webcam-video');
+    const resultElem = document.getElementById('result');
+    let lockScanner = false; // Блокировка, чтобы не слать дубли при одном сканировании
+
+    // 2. Инициализируем сканер Nimiq
+    const qrScanner = new QrScanner(
+        videoElem,
+        result => handleScannedCode(result.data), // Функция при успешном сканировании
+        {
+            returnDetailedScanResult: true,
+            highlightScanRegion: true, // Рисует рамку прицела на экране
+            highlightCodeOutline: true, // Подсвечивает сам штрихкод при нахождении
+            maxScansPerSecond: 5
+        }
+    );
+
+    // Запускаем камеру
+    qrScanner.start().catch(err => {
+        resultElem.style.color = 'red';
+        resultElem.innerText = 'Ошибка камеры: ' + err;
+    });
+
+    // 3. Логика отправки в n8n
+    function handleScannedCode(barcode) {
+        if (lockScanner) return; // Если процесс идет — игнорируем повторные кадры
+        lockScanner = true;
+
+        resultElem.className = 'loading';
+        resultElem.innerText = `Отправка кода ${barcode}...`;
+
+        // Шлем POST запрос в n8n
+        fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                barcode: barcode,
+                timestamp: new Date().toISOString()
+            })
+        })
+        .then(res => {
+            if (res.ok) {
+                resultElem.className = '';
+                resultElem.style.color = '#28a745';
+                resultElem.innerText = `Успешно отправлено: ${barcode}`;
+            } else {
+                throw new Error('Ошибка n8n');
+            }
+        })
+        .catch(err => {
+            resultElem.className = '';
+            resultElem.style.color = 'red';
+            resultElem.innerText = 'Ошибка отправки в n8n';
+        })
+        .finally(() => {
+            // Даем кладовщику 2.5 секунды убрать товар от камеры перед следующим сканированием
+            setTimeout(() => { lockScanner = false; }, 2500);
+        });
+    }
+</script>
+</body>
+</html>
