@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universal Webhook Barcode Scanner</title>
+    <!-- Подключаем open-source библиотеку сканера -->
+    <script src="https://unpkg.com"></script>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+            text-align: center; 
+            margin: 0; 
+            padding: 20px; 
+            background: #f0f2f5; 
+            color: #333; 
+        }
+        h2 { margin-bottom: 20px; font-size: 22px; }
+        #reader { 
+            max-width: 480px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 10px; 
+            border-radius: 12px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15); 
+        }
+        /* Стилизация встроенных элементов библиотеки для красоты */
+        #reader button {
+            padding: 10px 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            margin: 10px 0;
+        }
+        #reader select {
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid #ccc;
+            margin-top: 10px;
+        }
+        .box { 
+            max-width: 460px; 
+            margin: 15px auto; 
+            padding: 15px; 
+            background: white; 
+            border-radius: 10px; 
+            border-left: 5px solid #007bff; 
+            text-align: left; 
+            word-break: break-all; 
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+        .error-box { border-left-color: #dc3545; background: #fff5f5; display: none; }
+        .btn-test { 
+            padding: 12px 24px; 
+            font-size: 15px; 
+            background: #28a745; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            margin-top: 15px; 
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>🔍 Универсальный веб-сканер</h2>
+    
+    <!-- Сюда выводится окно камеры -->
+    <div id="reader"></div>
+
+    <!-- Информационные блоки -->
+    <div class="box">
+        <strong>🌐 Адрес вебхука (GET):</strong> <br>
+        <span id="webhook-uri">Определение...</span>
+    </div>
+
+    <div class="box">
+        <strong>📊 Данные сканирования:</strong> <br>
+        <span id="result" style="font-size: 18px; font-weight: bold; color: #111;">Ожидание штрих-кода...</span><br>
+        <small id="status" style="color: gray; font-size: 14px; display: block; margin-top: 5px;"></small>
+    </div>
+
+    <div id="error-log" class="box error-box">
+        <strong>⚠️ Ошибка:</strong> <span id="error-text"></span>
+    </div>
+
+    <!-- Кнопка быстрой проверки отправки вебхука без камеры -->
+    <button class="btn-test" onclick="testSend()">Тест отправки (Код: 777888)</button>
+
+    <script>
+        // 1. ПОЛУЧЕНИЕ ВЕБХУКА ИЗ ССЫЛКИ
+        // Скрипт ищет параметр ?webhook= в адресной строке. Если его нет, ставит дефолтный тест.
+        const urlParams = new URLSearchParams(window.location.search);
+        let WEBHOOK_URL = urlParams.get('webhook');
+        
+        if (!WEBHOOK_URL) {
+            // Временная заглушка для теста. Замените на свою или передавайте через ?webhook=
+            WEBHOOK_URL = "https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7"; 
+            document.getElementById('webhook-uri').innerHTML = WEBHOOK_URL + " <br><span style='color:orange; font-size:12px;'>(Используется тестовый вебхук. Добавьте к ссылке в браузере ?webhook=ВАШ_URL)</span>";
+        } else {
+            document.getElementById('webhook-uri').innerText = WEBHOOK_URL;
+        }
+
+        // Защита от дребезга контактов (чтобы один код не отправлялся повторно в течение 3 секунд)
+        let lastScannedCode = "";
+        let lastScanTime = 0;
+
+        // 2. ФУНКЦИЯ ОТПРАВКИ НА ВЕБХУК
+        function sendToWebhook(code) {
+            const currentTime = Date.now();
+            
+            // Если код совпадает с предыдущим и прошло меньше 3 секунд — игнорируем
+            if (code === lastScannedCode && (currentTime - lastScanTime < 3000)) {
+                return; 
+            }
+            
+            lastScannedCode = code;
+            lastScanTime = currentTime;
+
+            // Вибрация на смартфонах при успешном считывании
+            if (navigator.vibrate) navigator.vibrate(200);
+
+            document.getElementById('result').innerText = "Считан код: " + code;
+            document.getElementById('status').innerText = "Отправка GET-запроса...";
+            document.getElementById('status').style.color = "orange";
+            
+            // Формируем финальную ссылку GET-запроса
+            const finalUrl = `${WEBHOOK_URL}?barcode=${encodeURIComponent(code)}`;
+
+            // Отправляем запрос
+            fetch(finalUrl, { method: 'GET', mode: 'no-cors' })
+                .then(() => {
+                    document.getElementById('status').innerText = "✅ Запрос успешно отправлен!";
+                    document.getElementById('status').style.color = "green";
+                })
+                .catch(err => {
+                    showError("Ошибка отправки вебхука. Проверьте интернет. " + err);
+                });
+        }
+
+        // Функция для кнопки симуляции
+        function testSend() {
+            sendToWebhook("777888999");
+        }
+
+        function showError(msg) {
+            const errDiv = document.getElementById('error-log');
+            document.getElementById('error-text').innerText = msg;
+            errDiv.style.display = 'block';
+        }
+
+        // 3. НАСТРОЙКА И ЗАПУСК СКАНИРОВАНИЯ КАМЕРЫ
+        try {
+            // Включаем поддержку всех базовых типов штрих-кодов и QR
+            const formatsToSupport = [
+                Html5QrcodeSupportedFormats.QR_CODE,
+                Html5QrcodeSupportedFormats.EAN_13,
+                Html5QrcodeSupportedFormats.EAN_8,
+                Html5QrcodeSupportedFormats.CODE_128,
+                Html5QrcodeSupportedFormats.CODE_39,
+                Html5QrcodeSupportedFormats.UPC_A,
+                Html5QrcodeSupportedFormats.UPC_E
+            ];
+
+            const html5QrcodeScanner = new Html5QrcodeScanner(
+                "reader", 
+                { 
+                    fps: 15,                               // Частота сканирования кадров
+                    qrbox: { width: 320, height: 180 },    // Размер прямоугольной рамки-прицела
+                    formatsToSupport: formatsToSupport,
+                    experimentalFeatures: {
+                        useBarCodeDetectorIfSupported: true // Аппаратное ускорение для Android/Chrome
+                    }
+                },
+                /* verbose= */ false
+            );
+            
+            // Запуск рендеринга интерфейса сканера
+            html5QrcodeScanner.render(
+                (decodedText) => { sendToWebhook(decodedText); }, 
+                (error) => { /* Подавляем постоянный лог поиска кода в пустом кадре */ }
+            );
+        } catch (e) {
+            showError("Не удалось запустить сканер: " + e.message + ". На смартфонах убедитесь, что используется HTTPS подключение.");
+        }
+    </script>
+</body>
+</html>
