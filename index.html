@@ -56,6 +56,10 @@
     let scannedCount = 0;
     let decodingSession = null;
 
+    let candidateCode = null;
+    let candidateCount = 0;
+    const REQUIRED_CONFIRMATIONS = 3;
+
     function printLog(text, isErr = false, isSuccess = false) {
         const time = new Date().toLocaleTimeString();
         let className = '';
@@ -65,6 +69,79 @@
         const msg = `<span class="${className}">[${time}] ${text}</span>`;
         logBox.innerHTML += msg + '<br>';
         logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function isDigitsOnly(value) {
+        return /^\d+$/.test(value);
+    }
+
+    function isValidEAN13(code) {
+        if (!isDigitsOnly(code) || code.length !== 13) {
+            return false;
+        }
+
+        const digits = code.split('').map(Number);
+        const checkDigit = digits[12];
+        let sum = 0;
+
+        for (let i = 0; i < 12; i++) {
+            sum += digits[i] * (i % 2 === 0 ? 1 : 3);
+        }
+
+        const calculatedCheckDigit = (10 - (sum % 10)) % 10;
+        return calculatedCheckDigit === checkDigit;
+    }
+
+    function resetCandidate() {
+        candidateCode = null;
+        candidateCount = 0;
+    }
+
+    function processDetectedBarcode(rawCode) {
+        const barcode = String(rawCode || '').trim();
+
+        if (!isDigitsOnly(barcode)) {
+            return;
+        }
+
+        if (barcode.length !== 13) {
+            printLog(`⚠ Игнор: ${barcode} — не 13 цифр`, true);
+            resetCandidate();
+            return;
+        }
+
+        if (!isValidEAN13(barcode)) {
+            printLog(`⚠ Игнор: ${barcode} — неверная контрольная цифра`, true);
+            resetCandidate();
+            return;
+        }
+
+        if (candidateCode === barcode) {
+            candidateCount++;
+        } else {
+            candidateCode = barcode;
+            candidateCount = 1;
+        }
+
+        printLog(`🔎 Проверка: ${barcode} (${candidateCount}/${REQUIRED_CONFIRMATIONS})`);
+
+        if (candidateCount < REQUIRED_CONFIRMATIONS) {
+            return;
+        }
+
+        lock = true;
+        resetCandidate();
+
+        scannedCount++;
+        countDisplay.innerText = scannedCount;
+
+        printLog(`✓ Код подтверждён: ${barcode}`, false, true);
+
+        if (navigator.vibrate) {
+            navigator.vibrate([100, 50, 100]);
+        }
+
+        sendDataToN8n(barcode);
     }
 
     // Кнопка "Включить камеру"
@@ -82,17 +159,7 @@
             // Запуск декодирования
             decodingSession = await codeReader.decodeFromVideoDevice(undefined, 'video', (result, error) => {
                 if (result && !lock) {
-                    lock = true;
-                    const barcode = result.text;
-                    scannedCount++;
-                    countDisplay.innerText = scannedCount;
-                    
-                    printLog(`✓ Код: ${barcode}`, false, true);
-                    
-                    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
-                    
-                    // Отправляем в N8N
-                    sendDataToN8n(barcode);
+                    processDetectedBarcode(result.text);
                 }
             });
             
@@ -112,6 +179,7 @@
             codeReader.reset();
         }
         isScanning = false;
+        resetCandidate();
         scanTrigger.style.display = 'block';
         stopTrigger.style.display = 'none';
         printLog('⏹ Сканирование остановлено.');
@@ -119,7 +187,6 @@
 
     // Отправка в N8N через GET параметр
     function sendDataToN8n(code) {
-        // Правильный способ: GET запрос с параметром в URL
         const webhookUrl = N8N_URL + '?barcode=' + encodeURIComponent(code);
         
         printLog(`📤 Отправка кода ${code} в N8N...`);
@@ -131,7 +198,6 @@
             }
         })
         .then(response => {
-            // Проверяем статус ответа
             if (response.ok) {
                 printLog(`✓ N8N получил код: ${code}`, false, true);
             } else {
@@ -148,7 +214,6 @@
             printLog(`❌ Ошибка отправки: ${err.message}`, true);
         })
         .finally(() => {
-            // Через 2 секунды разблокируем сканирование
             setTimeout(() => { 
                 lock = false;
                 printLog('Готов к следующему коду.');
