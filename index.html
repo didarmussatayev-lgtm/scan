@@ -14,10 +14,14 @@
         .btn { background: #007bff; color: white; border: none; padding: 12px; font-size: 16px; border-radius: 6px; width: 100%; cursor: pointer; font-weight: bold; margin-top: 10px; }
         .btn:hover { background: #0056b3; }
         .btn-stop { background: #dc3545; margin-top: 5px; }
+        .btn-send { background: #17a2b8; }
+        .btn-send:hover { background: #117a8b; }
+        .btn-send:disabled { background: #5a6268; cursor: not-allowed; }
         #log-box { text-align: left; background: #111; color: #00ff66; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 12px; max-height: 180px; overflow-y: auto; border: 1px solid #333; }
         .err { color: #ff4d4d; }
         .success { color: #00ff66; }
         .counter { background: #28a745; padding: 10px; border-radius: 6px; margin-top: 10px; font-weight: bold; }
+        .subcounter { background: #3a3a46; padding: 10px; border-radius: 6px; margin-top: 10px; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -33,9 +37,14 @@
 
     <button class="btn" id="scan-trigger">▶ Включить камеру</button>
     <button class="btn btn-stop" id="stop-trigger" style="display:none;">⏹ Стоп</button>
+    <button class="btn btn-send" id="send-trigger">📤 Отправить в базу (0/100)</button>
     
     <div class="counter">
-        Отсканировано: <span id="count">0</span> ✓
+        Отсканировано всего: <span id="count">0</span> ✓
+    </div>
+
+    <div class="subcounter">
+        Готово к отправке: <span id="batch-count">0</span> / 100
     </div>
     
     <div id="log-box">Система готова к запуску.</div>
@@ -44,17 +53,22 @@
 <script>
     // WEBHOOK URL ИЗ N8N
     const N8N_URL = 'https://primary-production-6c79b.up.railway.app/webhook-test/f134cd2e-fd08-45d2-b90d-c97514ad45f7';
+    const BATCH_SIZE = 100;
 
     const logBox = document.getElementById('log-box');
     const scanTrigger = document.getElementById('scan-trigger');
     const stopTrigger = document.getElementById('stop-trigger');
+    const sendTrigger = document.getElementById('send-trigger');
     const countDisplay = document.getElementById('count');
+    const batchCountDisplay = document.getElementById('batch-count');
     
     let codeReader;
     let isScanning = false;
     let lock = false;
     let scannedCount = 0;
     let decodingSession = null;
+    let pendingCodes = [];
+    let isSendingBatch = false;
 
     let candidateCode = null;
     let candidateCount = 0;
@@ -69,6 +83,47 @@
         const msg = `<span class="${className}">[${time}] ${text}</span>`;
         logBox.innerHTML += msg + '<br>';
         logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function updateBatchUi() {
+        batchCountDisplay.innerText = pendingCodes.length;
+        sendTrigger.innerText = `📤 Отправить в базу (${pendingCodes.length}/${BATCH_SIZE})`;
+        sendTrigger.disabled = pendingCodes.length === 0 || isSendingBatch;
+    }
+
+    function playSuccessSound() {
+        try {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) {
+                return;
+            }
+
+            const audioContext = new AudioContextClass();
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
+            oscillator.frequency.setValueAtTime(1174, audioContext.currentTime + 0.08);
+
+            gainNode.gain.setValueAtTime(0.001, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.2, audioContext.currentTime + 0.01);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.22);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.22);
+
+            oscillator.onended = () => {
+                if (audioContext.state !== 'closed') {
+                    audioContext.close();
+                }
+            };
+        } catch (err) {
+            printLog(`⚠ Не удалось воспроизвести звук: ${err.message}`, true);
+        }
     }
 
     function isDigitsOnly(value) {
@@ -133,15 +188,83 @@
         resetCandidate();
 
         scannedCount++;
+        pendingCodes.push(barcode);
         countDisplay.innerText = scannedCount;
+        updateBatchUi();
 
         printLog(`✓ Код подтверждён: ${barcode}`, false, true);
+        printLog(`📦 Добавлен в очередь отправки: ${pendingCodes.length}/${BATCH_SIZE}`);
+
+        playSuccessSound();
 
         if (navigator.vibrate) {
             navigator.vibrate([100, 50, 100]);
         }
 
-        sendDataToN8n(barcode);
+        if (pendingCodes.length >= BATCH_SIZE) {
+            sendBatchToN8n();
+            return;
+        }
+
+        setTimeout(() => {
+            lock = false;
+            printLog('Готов к следующему коду.');
+        }, 700);
+    }
+
+    function sendBatchToN8n() {
+        if (isSendingBatch) {
+            printLog('⏳ Отправка уже выполняется, дождитесь завершения.', true);
+            return;
+        }
+
+        if (pendingCodes.length === 0) {
+            printLog('⚠ Нет товаров для отправки в базу.', true);
+            return;
+        }
+
+        const codesToSend = [...pendingCodes];
+        isSendingBatch = true;
+        lock = true;
+        updateBatchUi();
+
+        printLog(`📤 Отправка ${codesToSend.length} товаров в базу данных...`);
+
+        fetch(N8N_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+                total: codesToSend.length,
+                barcodes: codesToSend,
+                sentAt: new Date().toISOString()
+            })
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            return response.text();
+        })
+        .then(data => {
+            printLog(`✓ База получила ${codesToSend.length} товаров`, false, true);
+            if (data) {
+                printLog(`Ответ сервера: ${data.substring(0, 80)}`);
+            }
+            pendingCodes = [];
+            updateBatchUi();
+        })
+        .catch(err => {
+            printLog(`❌ Ошибка отправки в базу: ${err.message}`, true);
+        })
+        .finally(() => {
+            isSendingBatch = false;
+            lock = false;
+            updateBatchUi();
+            printLog('Готов к следующему коду.');
+        });
     }
 
     // Кнопка "Включить камеру"
@@ -156,7 +279,6 @@
 
             codeReader = new ZXing.BrowserMultiFormatReader();
             
-            // Запуск декодирования
             decodingSession = await codeReader.decodeFromVideoDevice(undefined, 'video', (result, error) => {
                 if (result && !lock) {
                     processDetectedBarcode(result.text);
@@ -185,41 +307,11 @@
         printLog('⏹ Сканирование остановлено.');
     });
 
-    // Отправка в N8N через GET параметр
-    function sendDataToN8n(code) {
-        const webhookUrl = N8N_URL + '?barcode=' + encodeURIComponent(code);
-        
-        printLog(`📤 Отправка кода ${code} в N8N...`);
+    sendTrigger.addEventListener('click', () => {
+        sendBatchToN8n();
+    });
 
-        fetch(webhookUrl, {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json'
-            }
-        })
-        .then(response => {
-            if (response.ok) {
-                printLog(`✓ N8N получил код: ${code}`, false, true);
-            } else {
-                printLog(`⚠ N8N ответил со статусом ${response.status}`, true);
-            }
-            return response.text();
-        })
-        .then(data => {
-            if (data) {
-                printLog(`N8N ответ: ${data.substring(0, 50)}`);
-            }
-        })
-        .catch(err => {
-            printLog(`❌ Ошибка отправки: ${err.message}`, true);
-        })
-        .finally(() => {
-            setTimeout(() => { 
-                lock = false;
-                printLog('Готов к следующему коду.');
-            }, 2000);
-        });
-    }
+    updateBatchUi();
 
     // При закрытии страницы
     window.addEventListener('beforeunload', () => {
