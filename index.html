@@ -49,22 +49,149 @@
     const scanTrigger = document.getElementById('scan-trigger');
     const stopTrigger = document.getElementById('stop-trigger');
     const countDisplay = document.getElementById('count');
+    const videoElement = document.getElementById('video');
+    const REQUIRED_CONFIRMATIONS = 3;
+    const EAN_13_REGEX = /^\d{13}$/;
     
     let codeReader;
     let isScanning = false;
     let lock = false;
     let scannedCount = 0;
     let decodingSession = null;
+    let pendingBarcode = '';
+    let confirmationCount = 0;
+    let audioContext = null;
 
     function printLog(text, isErr = false, isSuccess = false) {
         const time = new Date().toLocaleTimeString();
-        let className = '';
-        if (isErr) className = 'err';
-        else if (isSuccess) className = 'success';
-        
-        const msg = `<span class="${className}">[${time}] ${text}</span>`;
-        logBox.innerHTML += msg + '<br>';
+        const line = document.createElement('div');
+        if (isErr) line.className = 'err';
+        else if (isSuccess) line.className = 'success';
+        line.textContent = `[${time}] ${text}`;
+        logBox.appendChild(line);
         logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function resetConfirmationState() {
+        pendingBarcode = '';
+        confirmationCount = 0;
+    }
+
+    function isIPhoneSafari() {
+        const ua = navigator.userAgent || '';
+        const isAppleMobile = /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        const isSafari = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS|Chrome/i.test(ua);
+        return isAppleMobile && isSafari;
+    }
+
+    function createScannerHints() {
+        const hints = new Map();
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
+        return hints;
+    }
+
+    function createVideoConstraints() {
+        const constraints = {
+            video: {
+                facingMode: { ideal: 'environment' }
+            },
+            audio: false
+        };
+
+        if (isIPhoneSafari()) {
+            constraints.video.advanced = [{ focusMode: 'manual' }];
+        }
+
+        return constraints;
+    }
+
+    async function disableContinuousAutofocusIfPossible() {
+        if (!isIPhoneSafari() || !videoElement.srcObject) return;
+
+        const [track] = videoElement.srcObject.getVideoTracks();
+        if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return;
+
+        try {
+            const capabilities = track.getCapabilities();
+            if (Array.isArray(capabilities.focusMode)) {
+                if (capabilities.focusMode.includes('manual')) {
+                    await track.applyConstraints({ advanced: [{ focusMode: 'manual' }] });
+                } else if (capabilities.focusMode.includes('single-shot')) {
+                    await track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] });
+                }
+            }
+        } catch (err) {
+            printLog(`ℹ️ Не удалось изменить автофокус: ${err.message}`);
+        }
+    }
+
+    function isValidEan13Checksum(barcode) {
+        const digits = barcode.split('').map(Number);
+        const evenSum = digits.slice(0, 12).reduce((sum, digit, index) => sum + ((index + 1) % 2 === 0 ? digit : 0), 0);
+        const oddSum = digits.slice(0, 12).reduce((sum, digit, index) => sum + ((index + 1) % 2 !== 0 ? digit : 0), 0);
+        const total = oddSum + (evenSum * 3);
+        const remainder = total % 10;
+        const controlDigit = remainder === 0 ? 0 : 10 - remainder;
+        return digits[12] === controlDigit;
+    }
+
+    function processDetectedBarcode(result) {
+        if (lock || !result) return;
+
+        const format = typeof result.getBarcodeFormat === 'function' ? result.getBarcodeFormat() : result.barcodeFormat;
+        const barcode = (result.text || '').trim();
+
+        if (format !== ZXing.BarcodeFormat.EAN_13 || !EAN_13_REGEX.test(barcode)) {
+            resetConfirmationState();
+            printLog('❌ Неверный формат: нужен EAN-13 из 13 цифр.', true);
+            return;
+        }
+
+        if (!isValidEan13Checksum(barcode)) {
+            resetConfirmationState();
+            printLog(`❌ Неверная контрольная сумма EAN-13: ${barcode}.`, true);
+            return;
+        }
+
+        confirmationCount = barcode === pendingBarcode ? confirmationCount + 1 : 1;
+        pendingBarcode = barcode;
+        printLog(`📶 Подтверждение сканирования: ${confirmationCount}/${REQUIRED_CONFIRMATIONS} для ${barcode}.`);
+
+        if (confirmationCount < REQUIRED_CONFIRMATIONS) return;
+
+        lock = true;
+        resetConfirmationState();
+        scannedCount++;
+        countDisplay.innerText = scannedCount;
+        printLog(`✅ Код подтвержден ${REQUIRED_CONFIRMATIONS}/${REQUIRED_CONFIRMATIONS}: ${barcode}. Отправляем в N8N...`, false, true);
+        playSuccessSound();
+        if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+        sendDataToN8n(barcode);
+    }
+
+    function playSuccessSound() {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+
+        if (!audioContext) {
+            audioContext = new AudioCtx();
+        }
+
+        if (audioContext.state === 'suspended') {
+            audioContext.resume().catch(() => {});
+        }
+
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = 880;
+        gainNode.gain.setValueAtTime(0.0001, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.18, audioContext.currentTime + 0.02);
+        gainNode.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.18);
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        oscillator.start();
+        oscillator.stop(audioContext.currentTime + 0.18);
     }
 
     // Кнопка "Включить камеру"
@@ -72,33 +199,30 @@
         if (isScanning) return;
         
         try {
+            resetConfirmationState();
+            lock = false;
             isScanning = true;
             scanTrigger.style.display = 'none';
             stopTrigger.style.display = 'block';
             printLog('📷 Инициализация камеры и ZXing...', false, false);
 
-            codeReader = new ZXing.BrowserMultiFormatReader();
+            codeReader = new ZXing.BrowserMultiFormatReader(createScannerHints());
             
             // Запуск декодирования
-            decodingSession = await codeReader.decodeFromVideoDevice(undefined, 'video', (result, error) => {
-                if (result && !lock) {
-                    lock = true;
-                    const barcode = result.text;
-                    scannedCount++;
-                    countDisplay.innerText = scannedCount;
-                    
-                    printLog(`✓ Код: ${barcode}`, false, true);
-                    
-                    if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
-                    
-                    // Отправляем в N8N
-                    sendDataToN8n(barcode);
+            decodingSession = await codeReader.decodeFromConstraints(createVideoConstraints(), 'video', (result, error) => {
+                if (result) {
+                    processDetectedBarcode(result);
+                } else if (error && !(error instanceof ZXing.NotFoundException)) {
+                    printLog(`❌ Ошибка сканирования: ${error.message}`, true);
                 }
             });
+            await disableContinuousAutofocusIfPossible();
             
-            printLog('✓ Камера работает. Сканируйте штрихкоды.', false, true);
+            printLog('✓ Камера работает. Сканируйте EAN-13.', false, true);
 
         } catch (err) {
+            resetConfirmationState();
+            lock = false;
             isScanning = false;
             scanTrigger.style.display = 'block';
             stopTrigger.style.display = 'none';
@@ -111,6 +235,9 @@
         if (codeReader) {
             codeReader.reset();
         }
+        resetConfirmationState();
+        lock = false;
+        decodingSession = null;
         isScanning = false;
         scanTrigger.style.display = 'block';
         stopTrigger.style.display = 'none';
@@ -122,9 +249,9 @@
         // Правильный способ: GET запрос с параметром в URL
         const webhookUrl = N8N_URL + '?barcode=' + encodeURIComponent(code);
         
-        printLog(`📤 Отправка кода ${code} в N8N...`);
+        printLog(`📤 Отправка подтвержденного кода ${code} в N8N...`);
 
-        fetch(webhookUrl, {
+        return fetch(webhookUrl, {
             method: 'GET',
             headers: {
                 'Accept': 'application/json'
@@ -133,7 +260,7 @@
         .then(response => {
             // Проверяем статус ответа
             if (response.ok) {
-                printLog(`✓ N8N получил код: ${code}`, false, true);
+                printLog(`✅ Код ${code} принят и отправлен в N8N.`, false, true);
             } else {
                 printLog(`⚠ N8N ответил со статусом ${response.status}`, true);
             }
@@ -148,10 +275,11 @@
             printLog(`❌ Ошибка отправки: ${err.message}`, true);
         })
         .finally(() => {
+            resetConfirmationState();
             // Через 2 секунды разблокируем сканирование
             setTimeout(() => { 
                 lock = false;
-                printLog('Готов к следующему коду.');
+                printLog('Готов к следующему EAN-13.');
             }, 2000);
         });
     }
