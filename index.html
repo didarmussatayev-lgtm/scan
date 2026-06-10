@@ -17,7 +17,19 @@
         .btn-send { background: #17a2b8; }
         .btn-send:hover { background: #117a8b; }
         .btn-send:disabled { background: #5a6268; cursor: not-allowed; }
-        #log-box { text-align: left; background: #111; color: #00ff66; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 12px; max-height: 180px; overflow-y: auto; border: 1px solid #333; }
+        .manual-panel { text-align: left; background: #1f1f28; border-radius: 8px; padding: 12px; margin-top: 12px; }
+        .manual-title { margin: 0 0 10px 0; font-size: 14px; color: #ddd; font-weight: bold; }
+        .manual-grid { display: grid; grid-template-columns: 1.8fr 1fr; gap: 8px; }
+        .input { width: 100%; box-sizing: border-box; padding: 11px 12px; border-radius: 6px; border: 1px solid #4b4b5a; background: #111; color: #fff; font-size: 15px; }
+        .input:focus { outline: none; border-color: #17a2b8; }
+        .btn-add { background: #28a745; }
+        .btn-add:hover { background: #1e7e34; }
+        #pending-list { text-align: left; background: #111; color: #fff; padding: 12px; border-radius: 6px; margin-top: 12px; font-size: 12px; max-height: 180px; overflow-y: auto; }
+        .pending-item { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid #2b2b36; }
+        .pending-item:last-child { border-bottom: none; }
+        .pending-code { color: #9ad1ff; word-break: break-all; }
+        .pending-qty { color: #ffd166; white-space: nowrap; }
+        #log-box { text-align: left; background: #111; color: #00ff66; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 12px; max-height: 180px; overflow-y: auto; }
         .err { color: #ff4d4d; }
         .success { color: #00ff66; }
         .counter { background: #28a745; padding: 10px; border-radius: 6px; margin-top: 10px; font-weight: bold; }
@@ -27,8 +39,8 @@
 <body>
 
 <div class="wrapper">
-    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v3</h3>
-    <p style="color: #aaa; font-size: 13px; margin: 0;">Наведите красную линию на штрихкод товара</p>
+    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v4</h3>
+    <p style="color: #aaa; font-size: 13px; margin: 0;">Сканируйте один раз или вводите штрихкод и количество вручную</p>
     
     <div id="video-container">
         <video id="video"></video>
@@ -37,42 +49,54 @@
 
     <button class="btn" id="scan-trigger">▶ Включить камеру</button>
     <button class="btn btn-stop" id="stop-trigger" style="display:none;">⏹ Стоп</button>
-    <button class="btn btn-send" id="send-trigger">📤 Отправить в базу (0/100)</button>
+
+    <div class="manual-panel">
+        <div class="manual-title">Добавить товар по одному скану или вручную</div>
+        <div class="manual-grid">
+            <input class="input" id="barcode-input" type="text" inputmode="numeric" placeholder="Штрихкод (13 цифр)" maxlength="13">
+            <input class="input" id="quantity-input" type="number" inputmode="numeric" placeholder="Кол-во" min="1" step="1" value="1">
+        </div>
+        <button class="btn btn-add" id="add-trigger">➕ Добавить в очередь</button>
+    </div>
+
+    <button class="btn btn-send" id="send-trigger">📤 Отправить в базу (0 шт)</button>
     
     <div class="counter">
-        Отсканировано всего: <span id="count">0</span> ✓
+        Всего товаров в ��череди: <span id="count">0</span> шт
     </div>
 
     <div class="subcounter">
-        Готово к отправке: <span id="batch-count">0</span> / 100
+        Уникальных штрихкодов: <span id="batch-count">0</span>
     </div>
-    
+
+    <div id="pending-list">Очередь пуста.</div>
     <div id="log-box">Система готова к запуску.</div>
 </div>
 
 <script>
-    // WEBHOOK URL ИЗ N8N
     const N8N_URL = 'https://primary-production-2ac14.up.railway.app/webhook/c4cab906-47d7-45a3-aba1-60d6bccf399e';
-    const BATCH_SIZE = 100;
 
     const logBox = document.getElementById('log-box');
     const scanTrigger = document.getElementById('scan-trigger');
     const stopTrigger = document.getElementById('stop-trigger');
     const sendTrigger = document.getElementById('send-trigger');
+    const addTrigger = document.getElementById('add-trigger');
     const countDisplay = document.getElementById('count');
     const batchCountDisplay = document.getElementById('batch-count');
+    const barcodeInput = document.getElementById('barcode-input');
+    const quantityInput = document.getElementById('quantity-input');
+    const pendingList = document.getElementById('pending-list');
     
     let codeReader;
     let isScanning = false;
     let lock = false;
-    let scannedCount = 0;
     let decodingSession = null;
-    let pendingCodes = [];
+    let pendingItems = [];
     let isSendingBatch = false;
 
     let candidateCode = null;
     let candidateCount = 0;
-    const REQUIRED_CONFIRMATIONS = 3;
+    const REQUIRED_CONFIRMATIONS = 1;
 
     function printLog(text, isErr = false, isSuccess = false) {
         const time = new Date().toLocaleTimeString();
@@ -85,10 +109,33 @@
         logBox.scrollTop = logBox.scrollHeight;
     }
 
+    function getTotalQuantity() {
+        return pendingItems.reduce((sum, item) => sum + item.quantity, 0);
+    }
+
+    function renderPendingList() {
+        if (pendingItems.length === 0) {
+            pendingList.innerHTML = 'Очередь пуста.';
+            return;
+        }
+
+        pendingList.innerHTML = pendingItems
+            .map(item => `
+                <div class="pending-item">
+                    <span class="pending-code">${item.barcode}</span>
+                    <span class="pending-qty">${item.quantity} шт</span>
+                </div>
+            `)
+            .join('');
+    }
+
     function updateBatchUi() {
-        batchCountDisplay.innerText = pendingCodes.length;
-        sendTrigger.innerText = `📤 Отправить в базу (${pendingCodes.length}/${BATCH_SIZE})`;
-        sendTrigger.disabled = pendingCodes.length === 0 || isSendingBatch;
+        const totalQuantity = getTotalQuantity();
+        countDisplay.innerText = totalQuantity;
+        batchCountDisplay.innerText = pendingItems.length;
+        sendTrigger.innerText = `📤 Отправить в базу (${totalQuantity} шт)`;
+        sendTrigger.disabled = pendingItems.length === 0 || isSendingBatch;
+        renderPendingList();
     }
 
     function playSuccessSound() {
@@ -152,6 +199,43 @@
         candidateCount = 0;
     }
 
+    function addItemToQueue(barcode, quantity) {
+        const normalizedBarcode = String(barcode || '').trim();
+        const parsedQuantity = Number(quantity);
+
+        if (!isDigitsOnly(normalizedBarcode) || normalizedBarcode.length !== 13) {
+            printLog(`⚠ Игнор: ${normalizedBarcode || 'пусто'} — штрихкод должен быть 13 цифр`, true);
+            return false;
+        }
+
+        if (!isValidEAN13(normalizedBarcode)) {
+            printLog(`⚠ Игнор: ${normalizedBarcode} — неверная контрольная цифра`, true);
+            return false;
+        }
+
+        if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1) {
+            printLog('⚠ Количество должно быть целым числом больше 0', true);
+            return false;
+        }
+
+        const existingItem = pendingItems.find(item => item.barcode === normalizedBarcode);
+        if (existingItem) {
+            existingItem.quantity += parsedQuantity;
+        } else {
+            pendingItems.push({ barcode: normalizedBarcode, quantity: parsedQuantity });
+        }
+
+        updateBatchUi();
+        printLog(`✓ Добавлено: ${normalizedBarcode} × ${parsedQuantity}`, false, true);
+        playSuccessSound();
+
+        if (navigator.vibrate) {
+            navigator.vibrate(80);
+        }
+
+        return true;
+    }
+
     function processDetectedBarcode(rawCode) {
         const barcode = String(rawCode || '').trim();
 
@@ -159,14 +243,8 @@
             return;
         }
 
-        if (barcode.length !== 13) {
-            printLog(`⚠ Игнор: ${barcode} — не 13 цифр`, true);
-            resetCandidate();
-            return;
-        }
-
         if (!isValidEAN13(barcode)) {
-            printLog(`⚠ Игнор: ${barcode} — неверная контрольная цифра`, true);
+            printLog(`⚠ Игнор: ${barcode} — неверный EAN-13`, true);
             resetCandidate();
             return;
         }
@@ -178,7 +256,7 @@
             candidateCount = 1;
         }
 
-        printLog(`🔎 Проверка: ${barcode} (${candidateCount}/${REQUIRED_CONFIRMATIONS})`);
+        printLog(`🔎 Код найден: ${barcode} (${candidateCount}/${REQUIRED_CONFIRMATIONS})`);
 
         if (candidateCount < REQUIRED_CONFIRMATIONS) {
             return;
@@ -186,23 +264,12 @@
 
         lock = true;
         resetCandidate();
+        barcodeInput.value = barcode;
+        quantityInput.value = quantityInput.value && Number(quantityInput.value) > 0 ? quantityInput.value : 1;
 
-        scannedCount++;
-        pendingCodes.push(barcode);
-        countDisplay.innerText = scannedCount;
-        updateBatchUi();
-
-        printLog(`✓ Код подтверждён: ${barcode}`, false, true);
-        printLog(`📦 Добавлен в очередь отправки: ${pendingCodes.length}/${BATCH_SIZE}`);
-
-        playSuccessSound();
-
-        if (navigator.vibrate) {
-            navigator.vibrate([100, 50, 100]);
-        }
-
-        if (pendingCodes.length >= BATCH_SIZE) {
-            sendBatchToN8n();
+        const added = addItemToQueue(barcode, Number(quantityInput.value || 1));
+        if (!added) {
+            lock = false;
             return;
         }
 
@@ -218,17 +285,18 @@
             return;
         }
 
-        if (pendingCodes.length === 0) {
+        if (pendingItems.length === 0) {
             printLog('⚠ Нет товаров для отправки в базу.', true);
             return;
         }
 
-        const codesToSend = [...pendingCodes];
+        const itemsToSend = pendingItems.map(item => ({ ...item }));
+        const totalQuantity = getTotalQuantity();
         isSendingBatch = true;
         lock = true;
         updateBatchUi();
 
-        printLog(`📤 Отправка ${codesToSend.length} товаров в базу данных...`);
+        printLog(`📤 Отправка ${totalQuantity} шт (${itemsToSend.length} уникальных штрихкодов) в базу данных...`);
 
         fetch(N8N_URL, {
             method: 'POST',
@@ -237,8 +305,9 @@
                 'Accept': 'application/json'
             },
             body: JSON.stringify({
-                total: codesToSend.length,
-                barcodes: codesToSend,
+                totalItems: totalQuantity,
+                uniqueBarcodes: itemsToSend.length,
+                items: itemsToSend,
                 sentAt: new Date().toISOString()
             })
         })
@@ -249,12 +318,14 @@
             return response.text();
         })
         .then(data => {
-            printLog(`✓ База получила ${codesToSend.length} товаров`, false, true);
+            printLog(`✓ База получила ${totalQuantity} шт`, false, true);
             if (data) {
                 printLog(`Ответ сервера: ${data.substring(0, 80)}`);
             }
-            pendingCodes = [];
+            pendingItems = [];
             updateBatchUi();
+            barcodeInput.value = '';
+            quantityInput.value = 1;
         })
         .catch(err => {
             printLog(`❌ Ошибка отправки в базу: ${err.message}`, true);
@@ -267,7 +338,6 @@
         });
     }
 
-    // Кнопка "Включить камеру"
     scanTrigger.addEventListener('click', async () => {
         if (isScanning) return;
         
@@ -275,7 +345,7 @@
             isScanning = true;
             scanTrigger.style.display = 'none';
             stopTrigger.style.display = 'block';
-            printLog('📷 Инициализация камеры и ZXing...', false, false);
+            printLog('📷 Инициализация камеры и ZXing...');
 
             codeReader = new ZXing.BrowserMultiFormatReader();
             
@@ -295,7 +365,6 @@
         }
     });
 
-    // Кнопка "Стоп"
     stopTrigger.addEventListener('click', () => {
         if (codeReader) {
             codeReader.reset();
@@ -307,13 +376,33 @@
         printLog('⏹ Сканирование остановлено.');
     });
 
+    addTrigger.addEventListener('click', () => {
+        const barcode = barcodeInput.value.trim();
+        const quantity = Number(quantityInput.value || 1);
+        const added = addItemToQueue(barcode, quantity);
+
+        if (added) {
+            barcodeInput.value = '';
+            quantityInput.value = 1;
+            barcodeInput.focus();
+        }
+    });
+
+    barcodeInput.addEventListener('input', () => {
+        barcodeInput.value = barcodeInput.value.replace(/\D/g, '').slice(0, 13);
+    });
+
+    quantityInput.addEventListener('input', () => {
+        const cleaned = quantityInput.value.replace(/\D/g, '');
+        quantityInput.value = cleaned === '' ? '' : String(Math.max(1, Number(cleaned)));
+    });
+
     sendTrigger.addEventListener('click', () => {
         sendBatchToN8n();
     });
 
     updateBatchUi();
 
-    // При закрытии страницы
     window.addEventListener('beforeunload', () => {
         if (codeReader) {
             codeReader.reset();
