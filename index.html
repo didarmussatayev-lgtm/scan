@@ -24,11 +24,13 @@
         .input:focus { outline: none; border-color: #17a2b8; }
         .btn-add { background: #28a745; }
         .btn-add:hover { background: #1e7e34; }
-        #pending-list { text-align: left; background: #111; color: #fff; padding: 12px; border-radius: 6px; margin-top: 12px; font-size: 12px; max-height: 180px; overflow-y: auto; }
-        .pending-item { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid #2b2b36; }
+        #pending-list { text-align: left; background: #111; color: #fff; padding: 12px; border-radius: 6px; margin-top: 12px; font-size: 12px; max-height: 220px; overflow-y: auto; }
+        .pending-item { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #2b2b36; }
         .pending-item:last-child { border-bottom: none; }
         .pending-code { color: #9ad1ff; word-break: break-all; }
         .pending-qty { color: #ffd166; white-space: nowrap; }
+        .btn-delete { background: #dc3545; color: #fff; border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+        .btn-delete:hover { background: #b52a37; }
         #log-box { text-align: left; background: #111; color: #00ff66; font-family: monospace; padding: 12px; border-radius: 6px; margin-top: 15px; font-size: 12px; max-height: 180px; overflow-y: auto; }
         .err { color: #ff4d4d; }
         .success { color: #00ff66; }
@@ -39,7 +41,7 @@
 <body>
 
 <div class="wrapper">
-    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v4</h3>
+    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v5</h3>
     <p style="color: #aaa; font-size: 13px; margin: 0;">Сканируйте один раз или вводите штрихкод и количество вручную</p>
     
     <div id="video-container">
@@ -62,7 +64,7 @@
     <button class="btn btn-send" id="send-trigger">📤 Отправить в базу (0 шт)</button>
     
     <div class="counter">
-        Всего товаров в ��череди: <span id="count">0</span> шт
+        Всего товаров в очереди: <span id="count">0</span> шт
     </div>
 
     <div class="subcounter">
@@ -90,7 +92,6 @@
     let codeReader;
     let isScanning = false;
     let lock = false;
-    let decodingSession = null;
     let pendingItems = [];
     let isSendingBatch = false;
 
@@ -113,6 +114,18 @@
         return pendingItems.reduce((sum, item) => sum + item.quantity, 0);
     }
 
+    function removeItemFromQueue(barcode) {
+        const existingItem = pendingItems.find(item => item.barcode === barcode);
+        if (!existingItem) {
+            printLog(`⚠ Товар ${barcode} не найден в очереди`, true);
+            return;
+        }
+
+        pendingItems = pendingItems.filter(item => item.barcode !== barcode);
+        updateBatchUi();
+        printLog(`🗑 Удалён из очереди: ${barcode}`, false, true);
+    }
+
     function renderPendingList() {
         if (pendingItems.length === 0) {
             pendingList.innerHTML = 'Очередь пуста.';
@@ -124,9 +137,16 @@
                 <div class="pending-item">
                     <span class="pending-code">${item.barcode}</span>
                     <span class="pending-qty">${item.quantity} шт</span>
+                    <button class="btn-delete" data-barcode="${item.barcode}">Удалить</button>
                 </div>
             `)
             .join('');
+
+        pendingList.querySelectorAll('.btn-delete').forEach(button => {
+            button.addEventListener('click', () => {
+                removeItemFromQueue(button.dataset.barcode);
+            });
+        });
     }
 
     function updateBatchUi() {
@@ -265,9 +285,8 @@
         lock = true;
         resetCandidate();
         barcodeInput.value = barcode;
-        quantityInput.value = quantityInput.value && Number(quantityInput.value) > 0 ? quantityInput.value : 1;
 
-        const added = addItemToQueue(barcode, Number(quantityInput.value || 1));
+        const added = addItemToQueue(barcode, 1);
         if (!added) {
             lock = false;
             return;
@@ -349,7 +368,7 @@
 
             codeReader = new ZXing.BrowserMultiFormatReader();
             
-            decodingSession = await codeReader.decodeFromVideoDevice(undefined, 'video', (result, error) => {
+            await codeReader.decodeFromVideoDevice(undefined, 'video', (result) => {
                 if (result && !lock) {
                     processDetectedBarcode(result.text);
                 }
