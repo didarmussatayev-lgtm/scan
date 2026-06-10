@@ -41,19 +41,20 @@
 <body>
 
 <div class="wrapper">
-    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v5</h3>
-    <p style="color: #aaa; font-size: 13px; margin: 0;">Сканируйте один раз или вводите штрихкод и количество вручную</p>
+    <h3 style="margin: 0 0 5px 0;">📦 Складской Сканер v6</h3>
+    <p style="color: #aaa; font-size: 13px; margin: 0;">Нажмите СКАНИРОВАТЬ, затем добавьте товар с нужным количеством</p>
     
     <div id="video-container">
         <video id="video"></video>
         <div class="laser"></div>
     </div>
 
-    <button class="btn" id="scan-trigger">▶ Включить камеру</button>
+    <button class="btn" id="camera-trigger">▶ Включить камеру</button>
+    <button class="btn" id="scan-trigger" style="display:none;">СКАНИРОВАТЬ</button>
     <button class="btn btn-stop" id="stop-trigger" style="display:none;">⏹ Стоп</button>
 
     <div class="manual-panel">
-        <div class="manual-title">Добавить товар по одному скану или вручную</div>
+        <div class="manual-title">После сканирования проверьте штрихкод и укажите количество</div>
         <div class="manual-grid">
             <input class="input" id="barcode-input" type="text" inputmode="numeric" placeholder="Штрихкод (13 цифр)" maxlength="13">
             <input class="input" id="quantity-input" type="number" inputmode="numeric" placeholder="Кол-во" min="1" step="1" value="1">
@@ -79,6 +80,7 @@
     const N8N_URL = 'https://primary-production-2ac14.up.railway.app/webhook/c4cab906-47d7-45a3-aba1-60d6bccf399e';
 
     const logBox = document.getElementById('log-box');
+    const cameraTrigger = document.getElementById('camera-trigger');
     const scanTrigger = document.getElementById('scan-trigger');
     const stopTrigger = document.getElementById('stop-trigger');
     const sendTrigger = document.getElementById('send-trigger');
@@ -90,7 +92,8 @@
     const pendingList = document.getElementById('pending-list');
     
     let codeReader;
-    let isScanning = false;
+    let isCameraReady = false;
+    let isScanArmed = false;
     let lock = false;
     let pendingItems = [];
     let isSendingBatch = false;
@@ -219,7 +222,18 @@
         candidateCount = 0;
     }
 
-    function addItemToQueue(barcode, quantity) {
+    function stopArmedScanning(showLog = true) {
+        isScanArmed = false;
+        lock = false;
+        resetCandidate();
+        scanTrigger.disabled = !isCameraReady;
+        scanTrigger.innerText = 'СКАНИРОВАТЬ';
+        if (showLog) {
+            printLog('Сканирование остановлено. Для следующего товара снова нажмите СКАНИРОВАТЬ.');
+        }
+    }
+
+    function addItemToQueue(barcode, quantity, mode = 'manual') {
         const normalizedBarcode = String(barcode || '').trim();
         const parsedQuantity = Number(quantity);
 
@@ -240,13 +254,19 @@
 
         const existingItem = pendingItems.find(item => item.barcode === normalizedBarcode);
         if (existingItem) {
-            existingItem.quantity += parsedQuantity;
+            if (mode === 'manual-replace') {
+                existingItem.quantity = parsedQuantity;
+                printLog(`✓ Количество обновлено: ${normalizedBarcode} = ${parsedQuantity}`, false, true);
+            } else {
+                existingItem.quantity += parsedQuantity;
+                printLog(`✓ Добавлено: ${normalizedBarcode} + ${parsedQuantity}`, false, true);
+            }
         } else {
             pendingItems.push({ barcode: normalizedBarcode, quantity: parsedQuantity });
+            printLog(`✓ Добавлено: ${normalizedBarcode} × ${parsedQuantity}`, false, true);
         }
 
         updateBatchUi();
-        printLog(`✓ Добавлено: ${normalizedBarcode} × ${parsedQuantity}`, false, true);
         playSuccessSound();
 
         if (navigator.vibrate) {
@@ -257,6 +277,10 @@
     }
 
     function processDetectedBarcode(rawCode) {
+        if (!isScanArmed || lock) {
+            return;
+        }
+
         const barcode = String(rawCode || '').trim();
 
         if (!isDigitsOnly(barcode)) {
@@ -286,16 +310,17 @@
         resetCandidate();
         barcodeInput.value = barcode;
 
-        const added = addItemToQueue(barcode, 1);
-        if (!added) {
-            lock = false;
-            return;
+        if (!quantityInput.value || Number(quantityInput.value) < 1) {
+            quantityInput.value = 1;
         }
 
-        setTimeout(() => {
-            lock = false;
-            printLog('Готов к следующему коду.');
-        }, 700);
+        playSuccessSound();
+        if (navigator.vibrate) {
+            navigator.vibrate(80);
+        }
+
+        printLog(`✓ Штрихкод считан: ${barcode}. Теперь нажмите «Добавить в очередь».`, false, true);
+        stopArmedScanning(false);
     }
 
     function sendBatchToN8n() {
@@ -353,52 +378,72 @@
             isSendingBatch = false;
             lock = false;
             updateBatchUi();
-            printLog('Готов к следующему коду.');
+            printLog('Готов к следующей отправке.');
         });
     }
 
-    scanTrigger.addEventListener('click', async () => {
-        if (isScanning) return;
-        
-        try {
-            isScanning = true;
-            scanTrigger.style.display = 'none';
-            stopTrigger.style.display = 'block';
-            printLog('📷 Инициализация камеры и ZXing...');
+    cameraTrigger.addEventListener('click', async () => {
+        if (isCameraReady) {
+            return;
+        }
 
+        try {
+            printLog('📷 Инициализация камеры и ZXing...');
             codeReader = new ZXing.BrowserMultiFormatReader();
-            
+
             await codeReader.decodeFromVideoDevice(undefined, 'video', (result) => {
-                if (result && !lock) {
+                if (result) {
                     processDetectedBarcode(result.text);
                 }
             });
-            
-            printLog('✓ Камера работает. Сканируйте штрихкоды.', false, true);
 
-        } catch (err) {
-            isScanning = false;
+            isCameraReady = true;
+            cameraTrigger.style.display = 'none';
             scanTrigger.style.display = 'block';
-            stopTrigger.style.display = 'none';
+            stopTrigger.style.display = 'block';
+            scanTrigger.disabled = false;
+            printLog('✓ Камера работает. Для чтения товара нажмите СКАНИРОВАТЬ.', false, true);
+        } catch (err) {
+            isCameraReady = false;
             printLog(`❌ Ошибка камеры: ${err.message}`, true);
         }
+    });
+
+    scanTrigger.addEventListener('click', () => {
+        if (!isCameraReady) {
+            printLog('⚠ Сначала включите камеру.', true);
+            return;
+        }
+
+        if (isScanArmed) {
+            printLog('⏳ Сканирование уже запущено. Наведите камеру на штрихкод.', true);
+            return;
+        }
+
+        isScanArmed = true;
+        lock = false;
+        resetCandidate();
+        scanTrigger.innerText = 'Сканирование...';
+        scanTrigger.disabled = true;
+        printLog('🔍 Режим сканирования активирован. Наведите камеру на один товар.');
     });
 
     stopTrigger.addEventListener('click', () => {
         if (codeReader) {
             codeReader.reset();
         }
-        isScanning = false;
-        resetCandidate();
-        scanTrigger.style.display = 'block';
+        isCameraReady = false;
+        stopArmedScanning(false);
+        cameraTrigger.style.display = 'block';
+        scanTrigger.style.display = 'none';
         stopTrigger.style.display = 'none';
-        printLog('⏹ Сканирование остановлено.');
+        printLog('⏹ Камера остановлена.');
     });
 
     addTrigger.addEventListener('click', () => {
         const barcode = barcodeInput.value.trim();
         const quantity = Number(quantityInput.value || 1);
-        const added = addItemToQueue(barcode, quantity);
+        const added = addItemToQueue(barcode, quantity, 'manual-replace');
 
         if (added) {
             barcodeInput.value = '';
